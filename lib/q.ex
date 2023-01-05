@@ -1,17 +1,20 @@
 defmodule Q do
   @moduledoc """
-  Documentation for `ExQ`.
+    ExQ
+
+    Documentation for `ExQ`.
   """
 
   alias __MODULE__
   defstruct operations: [], names: MapSet.new()
+  @type t :: %__MODULE__{operations: operations, names: names}
   @type changes :: map
   @type run :: (changes -> {:ok | :error, any}) | {module, atom, [any]}
   @typep operation :: {:run, run} | {:put, any} | {:inspect, Keyword.t()}
   @typep operations :: [{name, operation}]
   @typep names :: MapSet.t()
   @type name :: any
-  @type t :: %__MODULE__{operations: operations, names: names}
+  @type exec_error :: {:error, name, any, list}
 
   @doc """
   Returns an empty `Q` struct.
@@ -55,16 +58,14 @@ defmodule Q do
   end
 
   @doc """
-  Adds a function to run as part of the queue.
-  The function should return either `{:ok, value}` or `{:error, value}`,
-  and receives the repo as the first argument, and the changes so far
-  as the second argument.
+  Executes the queue.
+
   ## Example
       Q.new()
       |> Q.run(:write, fn _, _ -> {:ok, nil} end)
       |> Q.exec()
   """
-  @spec exec(t) :: {:ok, term} | {:error, term}
+  @spec exec(t) :: {:ok, term} | exec_error
   def exec(%Q{} = que) do
     Enum.reverse(que.operations)
     |> apply_operations(que.names)
@@ -76,9 +77,9 @@ defmodule Q do
 
   @doc """
   Adds a function to run as part of the queue.
-  The function should return either `{:ok, value}` or `{:error, value}`,
-  and receives the repo as the first argument, and the changes so far
-  as the second argument.
+  The function should return either `{:ok, value}` or `{:error, value}`.
+  Receives the changes so far as its argument (prepended to those passed in the call to the function).
+
   ## Example
       Q.run(multi, :write, fn %{image: image} ->
         with :ok <- File.write(image.name, image.contents) do
@@ -99,9 +100,8 @@ defmodule Q do
   @doc """
   Adds a function to run as part of the queue.
   Similar to `run/3`, but allows to pass module name, function and arguments.
-  The function should return either `{:ok, value}` or `{:error, value}`, and
-  receives the repo as the first argument, and the changes so far as the
-  second argument (prepended to those passed in the call to the function).
+  The function should return either `{:ok, value}` or `{:error, value}`.
+  Receives the changes so far as its argument (prepended to those passed in the call to the function).
   """
   @spec run(t, name, module, function, args) :: t when function: atom, args: [any]
   def run(que, name, mod, fun, args)
@@ -150,9 +150,7 @@ defmodule Q do
         {:halt, {name, value, acc}}
 
       other ->
-        raise "expected operation `#{Kernel.inspect(name)}` to return {:ok, value}, {:halt, value} or {:error, value}, got: #{
-                Kernel.inspect(other)
-              }"
+        raise "expected operation `#{Kernel.inspect(name)}` to return {:ok, value}, {:halt, value} or {:error, value}, got: #{Kernel.inspect(other)}"
     end
   end
 
