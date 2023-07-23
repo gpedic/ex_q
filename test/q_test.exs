@@ -4,8 +4,21 @@ defmodule QTest do
   doctest Q
 
   defmodule TestWriter do
-    def write(%{read: text}, opts \\ []) do
+    def write(text, opts \\ [])
+
+    def write(%{read: text}, opts) do
       upcase = Keyword.get(opts, :upcase, false)
+
+      if upcase do
+        {:ok, String.upcase(text)}
+      else
+        {:ok, text}
+      end
+    end
+
+    def write(text, opts) do
+      upcase = Keyword.get(opts, :upcase, false)
+      IO.inspect(opts)
 
       if upcase do
         {:ok, String.upcase(text)}
@@ -22,7 +35,7 @@ defmodule QTest do
   end
 
   describe "exec/0" do
-    test "executing nothign returns expected result" do
+    test "executing without queued tasks returns nil" do
       assert {:ok, nil} = Q.new() |> Q.exec()
     end
 
@@ -57,7 +70,7 @@ defmodule QTest do
     end
   end
 
-  describe "run/5" do
+  describe "run/6" do
     test "basic functionality" do
       result =
         Q.new()
@@ -70,29 +83,50 @@ defmodule QTest do
     end
   end
 
-  test "run/3" do
-    result =
-      Q.new()
-      |> Q.run(:read, fn _ -> {:ok, "hello world"} end)
-      |> Q.run(:write1, fn params -> TestWriter.write(params, upcase: true) end)
-      |> Q.run(:write2, {TestWriter, :write, [[upcase: true]]})
-      |> Q.run(:write3, &TestWriter.write/1)
-      |> Q.exec()
+  describe "run/4" do
+    test "basic functionality" do
+      result =
+        Q.new()
+        |> Q.run(:read, fn _ -> {:ok, "hello world"} end)
+        |> Q.run(:write1, fn params -> TestWriter.write(params, upcase: true) end)
+        |> Q.run(:write2, {TestWriter, :write, [[upcase: true]]})
+        |> Q.run(:write3, &TestWriter.write/1)
+        |> Q.exec()
 
-    assert {:ok,
-            %{
-              read: "hello world",
-              write1: "HELLO WORLD",
-              write2: "HELLO WORLD",
-              write3: "hello world"
-            }} = result
-  end
+      assert {:ok,
+              %{
+                read: "hello world",
+                write1: "HELLO WORLD",
+                write2: "HELLO WORLD",
+                write3: "hello world"
+              }} = result
+    end
 
-  test "repeating an operation" do
-    fun = fn _, _ -> {:ok, :ok} end
+    test "the only the requested params are passed" do
+      result =
+        Q.new()
+        |> Q.run(:read2, fn _ -> {:ok, "hello world"} end)
+        |> Q.run(:write, fn text -> {:ok, text} end, [:read2])
+        |> Q.run(:write2, {TestWriter, :write, [upcase: true]}, [:read2])
+        |> Q.run(:write3, &TestWriter.write/1, [:read2])
+        |> Q.exec()
 
-    assert_raise RuntimeError, ~r":run is already a member", fn ->
-      Q.new() |> Q.run(:run, fun) |> Q.run(:run, fun)
+      assert {:ok,
+              %{
+                read2: "hello world",
+                write: "hello world",
+                write2: "HELLO WORLD",
+                write3: "hello world"
+              }} = result
+    end
+
+    test "it should fail to run an operation with invalid params" do
+      assert_raise RuntimeError, ~r"The parameter :foo does not exist in the queue.", fn ->
+        Q.new()
+        |> Q.run(:read, fn _ -> {:ok, "hello world"} end)
+        |> Q.run(:write, fn _ -> {:error, :invalid_params} end, [:foo])
+        |> Q.exec()
+      end
     end
   end
 
@@ -166,11 +200,39 @@ defmodule QTest do
     end
   end
 
-  test "executing invalid operations fails" do
-    Q.new()
-    |> Q.put(:error, {:error, "test"})
-    |> Q.exec()
+  describe "negative cases" do
+    test "duplicating an operation will raise and error" do
+      fun = fn _, _ -> {:ok, :ok} end
 
-    # |> IO.inspect
+      assert_raise RuntimeError, ~r":run is already a member", fn ->
+        Q.new() |> Q.run(:run, fun) |> Q.run(:run, fun)
+      end
+    end
+
+    test "returning invalid return value will raise and error" do
+      assert_raise RuntimeError,
+                   ~r/^expected operation `:bad_return` to return {:ok, value}, {:halt, value} or {:error, value}, got: {:invalid, 1}$/,
+                   fn ->
+                     Q.new()
+                     |> Q.run(:bad_return, fn _ -> {:invalid, 1} end)
+                     |> Q.exec()
+                   end
+
+      assert_raise RuntimeError,
+                   ~r"expected operation `:empty` to return {:ok, value}, {:halt, value} or {:error, value}, got: nil",
+                   fn ->
+                     Q.new()
+                     |> Q.run(:empty, fn _ -> nil end)
+                     |> Q.exec()
+                   end
+    end
+
+    test "passing and operation that is not a function or mfa tuple will error" do
+      assert_raise FunctionClauseError, fn ->
+        Q.new()
+        |> Q.run(:nil_op, nil)
+        |> Q.exec()
+      end
+    end
   end
 end

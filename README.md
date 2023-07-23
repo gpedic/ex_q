@@ -9,21 +9,28 @@
 ExQ provides a way of queuing the execution of operations and aggregates all returned values similar to `Ecto.Multi`.
 Operations are queued and executed in FIFO order.
 
+Functions can specify the keys they require from the queue's accumulated data via the `params` argument in the `run` function. By specifying params that way the called function does not have to be aware of the aggregate data structure.
+
+In the following example, the write step will receive only the location since it is requested as param.
+Params will be provided in the order they are specified.
+
+On the other hand in the fail step, we can match the aggregate data since no params are specified.
+
 ```elixir
     iex> pipeline = Q.new()
-    |> Q.put(:init, %{test: "setup"})
-    |> Q.run(:read, fn _ -> {:ok, "Once upon a time ..."} end)
+    |> Q.put(:location, "Space")
+    |> Q.run(:write, fn location -> {:ok, "#{location} the final frontier."} end, [:location])
 
     iex> pipeline |> Q.exec()
 
-    {:ok, %{init: %{test: "setup"}, read: "Once upon a time ..."}}
-
+    {:ok, %{location: "Space", write: "Space the final frontier."}}
 
     iex> pipeline 
-    |> Q.run(:write, fn %{read: _read} -> {:error, :write_failed} end)
+    |> Q.run(:fail, fn %{write: _write} -> {:error, :been_there_before} end)
     |> Q.exec()
 
-    {:error, :write, :write_failed, %{init: %{test: "setup"}, read: "Once upon a time ..."}}
+    {:error, :write, :been_there_before, %{location: "Space", write: "Space the final frontier"}}
+
 ```
 
 ## Comparison to `with`
@@ -87,13 +94,41 @@ A major benefit of using ExQ over `with` is that the results of all steps before
 * With ExQ the `user` result is available for error handling if `create_post` fails
 * We can also handle errors for specific steps while `create_post/2` can return a standard error tuple like `{:error, "msg"}`
 
-## Ending execution early
-Return `{:halt, value}` to end execution early
+## Using params in Functions
+
+The run function has an optional params argument, which is a list of keys. When provided, the function only receives the values associated with these keys as arguments. If params are not provided, the function receives the whole accumulated data. The keys in params must be defined before being used.
+
+The params are provided to the function in order, any args if defined will be passed after the params.
+
+```elixir
+    iex> pipeline = Q.new()
+    |> Q.put(:init, %{test: "setup"})
+    |> Q.run(:read, fn val -> {:ok, "Received: #{val}"} end, [:init])
+    |> Q.run(:write, {Test, :write, [upcase: true]}, [:init])
+    |> Q.exec()
+
+    {:ok, %{init: %{test: "setup"}, read: "Received: setup"}}
+```
+
+For the example above we would implement Test.write/2 like
+
+```elixir
+defmodule Test do
+  def write(val, opts \\ []) do
+    upcase? = Keyword.get(opts, :upcase, false)
+    ...
+  end
+end
+```
+
+## Halting execution early
+Return `{:halt, value}` to halt execution at any point.
+Halting is not considered an error and will return an `:ok` tuple will all values computed before halting.
 
 ```elixir
   iex> Q.new()
-  |> Q.put(:user_id, 1235)
-  |> Q.run(:user, &Blog.fetch_user/1 end)
+  |> Q.put(:user_id, "f68b7f42-d343-48e4-8f76-c434fab0ba1a")
+  |> Q.run(:user, &Blog.fetch_user/1, [:user_id])
   |> Q.run(:earned_daily_award, fn %{user: user} ->
       count = Blog.count_posts_today(user)
       if count < 1 do
@@ -104,6 +139,8 @@ Return `{:halt, value}` to end execution early
   end)
   |> Q.run(:send_daily_award, Blog, :send_daily_award, [])
   |> Q.exec()
+
+  {:ok, %{user_id: "...", user: %User{}}}
 ```
 
 ## Installation
