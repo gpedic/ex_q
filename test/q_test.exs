@@ -106,7 +106,7 @@ defmodule QTest do
         Q.new()
         |> Q.run(:read2, fn _ -> {:ok, "hello world"} end)
         |> Q.run(:write, fn text -> {:ok, text} end, [:read2])
-        |> Q.run(:write2, {TestWriter, :write, [upcase: true]}, [:read2])
+        |> Q.run(:write2, {TestWriter, :write, [[upcase: true]]}, [:read2])
         |> Q.run(:write3, &TestWriter.write/1, [:read2])
         |> Q.exec()
 
