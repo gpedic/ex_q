@@ -18,7 +18,6 @@ defmodule QTest do
 
     def write(text, opts) do
       upcase = Keyword.get(opts, :upcase, false)
-      IO.inspect(opts)
 
       if upcase do
         {:ok, String.upcase(text)}
