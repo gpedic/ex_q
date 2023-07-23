@@ -33,9 +33,11 @@ On the other hand in the fail step, we can match the aggregate data since no par
 
 ```
 
-## Comparison to `with`
+## Why use Q?
 
-A major benefit of using ExQ over `with` is that the results of all steps before an error are available and the step which produced the error is also easily identifiable.
+A major benefit of using ExQ is that the results of all steps before an error are available and the step which produced the error is also easily identifiable.
+
+Compare the following two snippets:
 
 ```elixir
   user_id = 1234
