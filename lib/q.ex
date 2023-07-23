@@ -24,7 +24,7 @@ defmodule Q do
       []
   """
   @spec new :: t
-  def new() do
+  def new do
     %Q{}
   end
 
@@ -164,5 +164,5 @@ defmodule Q do
     apply(mod, fun, [acc | args])
   end
 
-  defp apply_run_fun(fun, acc), do: apply(fun, [acc])
+  defp apply_run_fun(fun, acc), do: fun.(acc)
 end
