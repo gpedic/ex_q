@@ -145,7 +145,7 @@ defmodule Q do
   `{:error, value}` if the operation failed. The state of the queue is passed
   as arguments to the function if no params are specified.
 
-  Functions can additionally return {:halt, value} to halt execution early.
+  Functions can also return {:halt, value} to halt execution at any point.
 
   ## Params
 
@@ -168,10 +168,14 @@ defmodule Q do
   end
 
   @doc """
-  Adds a function to run as part of the queue.
-  Similar to `run/3`, but allows to pass module name, function and arguments.
-  The function should return either `{:ok, value}` or `{:error, value}`.
-  Receives the changes so far as its argument (prepended to those passed in the call to the function).
+  Adds a function to be executed as part of the queue.
+  Similar to `run/4`, but allows to pass module name, function and arguments.
+
+  The function should return either `{:ok, value}` if the operation was successful or
+  `{:error, value}` if the operation failed. The state of the queue is passed
+  as arguments to the function if no params are specified.
+
+  Functions can also return {:halt, value} to halt execution at any point.
 
   ## Params
 
@@ -182,7 +186,6 @@ defmodule Q do
   - `args`: Arguments that should be passed to the function.
   - `params` (optional): A list of keys in the queue's internal state that should be passed to the function as arguments.
   """
-  @deprecated "Use run/4 instead"
   @spec run(t, name, module, function, args, [atom]) :: t when function: atom, args: [any]
   def run(que, name, mod, fun, args, params \\ [])
       when is_atom(mod) and is_atom(fun) and is_list(args) do
