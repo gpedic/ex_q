@@ -8,9 +8,10 @@ defmodule Q do
   alias __MODULE__
   defstruct operations: [], names: MapSet.new()
   @type t :: %__MODULE__{operations: operations, names: names}
-  @type changes :: map
-  @type run :: (changes -> {:ok | :error, any}) | {module, atom, [any]}
-  @typep operation :: {:run, run} | {:put, any} | {:inspect, Keyword.t()}
+  @type state :: map
+  @type fun_arity1 :: ((state) -> {:ok | :error | :halt, any})
+  @type fun_mfa :: {module, atom, [any]}
+  @typep operation :: {:run, fun} | {:put, any} | {:inspect, Keyword.t()}
   @typep operations :: [{name, operation}]
   @typep names :: MapSet.t()
   @type name :: any
@@ -32,7 +33,7 @@ defmodule Q do
   end
 
   @doc """
-  Adds a value to the changes so far under the given name.
+  Adds a value to the state so far under the given name.
 
   This function modifies the queue by associating the given `name` with a `value`.
   If the operation is successful, the `name` will become a key in the queue's internal
@@ -151,20 +152,25 @@ defmodule Q do
 
   - `que`: The queue to which the function should be added.
   - `name`: A unique name for this operation. It will be used as a key in the queue's internal state.
-  - `run`: The function to be run. It can be an anonymous function or a tuple containing a module, function, and arguments.
+  - `fun`: The function to be run. It can be an anonymous function or a tuple containing a module, function, and arguments.
   - `params` (optional): A list of keys in the queue's internal state that should be passed to the function as arguments.
 
   """
-  @spec run(t, name, run, [atom]) :: t
-  def run(que, name, run, params \\ [])
+  @spec run(t, name, fun_arity1 | fun_mfa, [atom]) :: t
+  def run(que, name, fun, params \\ [])
 
-  def run(que, name, {mod, fun, args} = _run, params)
+  def run(que, name, {mod, fun, args}, params)
       when is_atom(mod) and is_atom(fun) and is_list(args) do
     add_operation(que, name, {:run, {mod, fun, args, params}}, params)
   end
 
-  def run(que, name, run, params) when is_function(run) do
-    add_operation(que, name, {:run, {run, params}}, params)
+  def run(que, name, {mod, fun}, params)
+  when is_atom(mod) and is_atom(fun) do
+    run(que, name, {mod, fun, []}, params)
+  end
+
+  def run(que, name, fun, params) when is_function(fun) do
+    add_operation(que, name, {:run, {fun, params}}, params)
   end
 
   @doc """
@@ -186,7 +192,7 @@ defmodule Q do
   - `args`: Arguments that should be passed to the function.
   - `params` (optional): A list of keys in the queue's internal state that should be passed to the function as arguments.
   """
-  @spec run(t, name, module, function, args, [atom]) :: t when function: atom, args: [any]
+  @spec run(t, name, module, function :: atom, args :: [any], [atom]) :: t
   def run(que, name, mod, fun, args, params \\ [])
       when is_atom(mod) and is_atom(fun) and is_list(args) do
     add_operation(que, name, {:run, {mod, fun, args, params}}, params)
