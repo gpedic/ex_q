@@ -9,7 +9,7 @@ defmodule Q do
   defstruct operations: [], names: MapSet.new()
   @type t :: %__MODULE__{operations: operations, names: names}
   @type state :: map
-  @type fun_arity1 :: ((state) -> {:ok | :error | :halt, any})
+  @type fun_arity1 :: (state -> {:ok | :error | :halt, any})
   @type fun_mfa :: {module, atom, [any]}
   @typep operation :: {:run, fun} | {:put, any} | {:inspect, Keyword.t()}
   @typep operations :: [{name, operation}]
@@ -165,7 +165,7 @@ defmodule Q do
   end
 
   def run(que, name, {mod, fun}, params)
-  when is_atom(mod) and is_atom(fun) do
+      when is_atom(mod) and is_atom(fun) do
     run(que, name, {mod, fun, []}, params)
   end
 
