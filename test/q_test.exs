@@ -101,6 +101,20 @@ defmodule QTest do
               }} = result
     end
 
+    test "when using a 2 element tuple args default to []" do
+      result =
+        Q.new()
+        |> Q.put(:init, "hello world")
+        |> Q.run(:write, {TestWriter, :write}, [:init])
+        |> Q.exec()
+
+      assert {:ok,
+              %{
+                init: "hello world",
+                write: "hello world"
+              }} = result
+    end
+
     test "the only the requested params are passed" do
       result =
         Q.new()
