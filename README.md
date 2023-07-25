@@ -6,8 +6,8 @@
 
 # ExQ
 
-ExQ provides a way of queuing the execution of operations and aggregates all returned values similar to `Ecto.Multi`.
-Operations are queued and executed in FIFO order.
+ExQ provides a powerful way to queue and execute operations while aggregating all returned values, similar to `Ecto.Multi`.
+Operations are executed in a first-in-first-out (FIFO) order.
 
 Functions can specify the keys they require from the queue's accumulated data via the `params` argument in the `run` function. By specifying params that way the called function does not have to be aware of the aggregate data structure.
 
@@ -35,10 +35,33 @@ On the other hand in the fail step, we can match the aggregate data since no par
 
 ## Why use Q?
 
-A major benefit of using ExQ is that the results of all steps before an error are available and the step which produced the error is also easily identifiable.
+One of the major benefits of using ExQ is that it provides access to the results of all steps before an error occurs, making it easy to identify the step that produced the error.
 
-Compare the following two snippets:
+Consider the following two code snippets which use the Blog module to do some work:
+```elixir
+  defmodule Blog do
+    def fetch_user(user_id) do
+      {:ok, %User{id: user_id, name: "John Doe"}}
+    end
 
+    def create_post(user, content, opts \\ []) do
+      upcase = Keyword.get(opts, :upcase, false)
+
+      if upcase do
+        insert_post(user, String.upcase(content))
+      else
+        insert_post(user, content)
+      end
+    end
+
+    def count_posts(user) do
+      {:ok, get_post_count(user)}
+    end
+  end
+
+```
+
+### Without ExQ
 ```elixir
   user_id = 1234
   with {:ok, user} <- Blog.fetch_user(user_id),
@@ -57,29 +80,14 @@ Compare the following two snippets:
 * When `with` is used on its own the return of the `user` step is not available for error handling if create_post fails
 * To match a specific error in `else` requires workarounds e.g. `create_post/2` returning a special error tuple
 
+### With ExQ
 
 ```elixir
-  defmodule Blog do
-    def create_post(%{user: user, content: content}, opts) do
-      upcase = Keyword.get(opts, :upcase, false)
-
-      if upcase do
-        insert_post(user, String.upcase(content))
-      else
-        insert_post(user, content)
-      end
-    end
-
-    def count_posts(%{user: user}) do
-      {:ok, get_post_count(user)}
-    end
-  end
-
   ex_que = Q.new()
   |> Q.put(:content, "hello world")
   |> Q.run(:user, fn %{user_id: id} -> Blog.fetch_user(id) end)
-  |> Q.run(:post, Blog, :create_post, [[upcase: true]])
-  |> Q.run(:post_count, &Blog.count_posts/1)
+  |> Q.run(:post, Blog, :create_post, [[upcase: true]], [:user, :content])
+  |> Q.run(:post_count, &Blog.count_posts/1, [:user])
 
   with {:ok, %{post: post}} <- Q.exec(ex_que) do
     broadcast(post)
@@ -98,29 +106,30 @@ Compare the following two snippets:
 
 ## Using params in Functions
 
-The run function has an optional params argument, which is a list of keys. When provided, the function only receives the values associated with these keys as arguments. If params are not provided, the function receives the whole accumulated data. The keys in params must be defined before being used.
+The run function has an optional params argument, which is a list of keys. When provided, the function only receives the values associated with these keys as arguments. If params are not provided, the function receives the entire accumulated data. The keys in params must exist before being used.
 
-The params are provided to the function in order, any args if defined will be passed after the params.
+The params are provided to the function in order, and any additional arguments are passed after the params.
 
 ```elixir
+    defmodule Test do
+      def print(val, opts \\ []) do
+        upcase? = Keyword.get(opts, :upcase, false)
+        if upcase? do
+          String.upcase(val)
+        else
+          val
+        end
+        |> IO.inspect()
+      end
+    end
+
     iex> pipeline = Q.new()
-    |> Q.put(:init, %{test: "setup"})
-    |> Q.run(:read, fn val -> {:ok, "Received: #{val}"} end, [:init])
-    |> Q.run(:write, {Test, :write, [upcase: true]}, [:init])
+    |> Q.put(:init, %{start: "To boldly go"})
+    |> Q.run(:go, fn %{start: val} -> {:ok, "#{val} where no man has gone before"} end, [:init])
+    |> Q.run(:print, {Test, :write, [upcase: true]}, [:go])
     |> Q.exec()
 
-    {:ok, %{init: %{test: "setup"}, read: "Received: setup"}}
-```
-
-For the example above we would implement Test.write/2 like
-
-```elixir
-defmodule Test do
-  def write(val, opts \\ []) do
-    upcase? = Keyword.get(opts, :upcase, false)
-    ...
-  end
-end
+    {:ok, %{init: %{start: "To boldly go"}, read: "To boldly go where no man has gone before", print: "TO BOLDLY GO WHERE NO MAN HAS GONE BEFORE"}}
 ```
 
 ## Halting execution early
