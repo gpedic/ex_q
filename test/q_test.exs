@@ -1,6 +1,7 @@
 defmodule QTest do
   use ExUnit.Case
   import ExUnit.CaptureIO
+  import Q
   doctest Q
 
   defmodule TestWriter do
@@ -87,9 +88,9 @@ defmodule QTest do
       result =
         Q.new()
         |> Q.run(:read, fn _ -> {:ok, "hello world"} end)
-        |> Q.run(:write1, fn params -> TestWriter.write(params, upcase: true) end)
-        |> Q.run(:write2, {TestWriter, :write, [[upcase: true]]})
-        |> Q.run(:write3, &TestWriter.write/1)
+        |> Q.run(:write1, fn text -> TestWriter.write(text, upcase: true) end, [:read])
+        |> Q.run(:write2, {TestWriter, :write, [[upcase: true]]}, {[:read], order: :prepend})
+        |> Q.run(:write3, &TestWriter.write/1, [:read])
         |> Q.exec()
 
       assert {:ok,
@@ -120,7 +121,7 @@ defmodule QTest do
         Q.new()
         |> Q.run(:read2, fn _ -> {:ok, "hello world"} end)
         |> Q.run(:write, fn text -> {:ok, text} end, [:read2])
-        |> Q.run(:write2, {TestWriter, :write, [[upcase: true]]}, [:read2])
+        |> Q.run(:write2, {TestWriter, :write, [[upcase: true]]}, {[:read2], order: :prepend})
         |> Q.run(:write3, &TestWriter.write/1, [:read2])
         |> Q.exec()
 
@@ -246,6 +247,109 @@ defmodule QTest do
         |> Q.run(:nil_op, nil)
         |> Q.exec()
       end
+    end
+  end
+
+  describe "DSL integration" do
+    test "queue macro creates valid Q struct" do
+      result = queue do
+        put(:test, "value")
+      end
+
+      assert %Q{} = result
+      assert [test: {:put, "value"}] = Q.to_list(result)
+    end
+
+    test "DSL supports function references" do
+      result =
+        queue do
+          put(:base64_text, "Zm9vYmFy")
+          run(:decoded, &Base.decode64/1, [:base64_text])
+        end
+        |> Q.exec()
+
+      assert {:ok, %{base64_text: "Zm9vYmFy", decoded: "foobar"}} = result
+    end
+
+    test "DSL supports anonymous functions with multiple params" do
+      result =
+        queue do
+          put(:first, "hello")
+          put(:second, "world")
+          run(:join, fn a, b -> {:ok, "#{a} #{b}"} end, [:first, :second])
+        end
+        |> Q.exec()
+
+      assert {:ok, %{first: "hello", second: "world", join: "hello world"}} = result
+    end
+
+    test "DSL handles errors properly" do
+      result =
+        queue do
+          put(:input, -1)
+          run(:validate, fn n -> if n > 0, do: {:ok, n}, else: {:error, :invalid_number} end, [:input])
+        end
+        |> Q.exec()
+
+      assert {:error, :validate, :invalid_number, %{input: -1}} = result
+    end
+
+    test "DSL supports halt operations" do
+      result =
+        queue do
+          put(:count, 0)
+          run(:check, fn n -> if n == 0, do: {:halt, :zero}, else: {:ok, :continue} end, [:count])
+          run(:never, fn _ -> {:ok, :should_not_run} end)
+        end
+        |> Q.exec()
+
+      assert {:ok, %{count: 0, check: :zero}} = result
+    end
+
+    test "DSL works with MFA style calls" do
+      result =
+        queue do
+          put(:base64_text, "aGVsbG8gd29ybGQ=")
+          run(:decoded, {Base, :decode64, []}, [:base64_text])
+        end
+        |> Q.exec()
+
+      assert {:ok, %{base64_text: "aGVsbG8gd29ybGQ=", decoded: "hello world"}} = result
+    end
+
+    test "DSL passes MFA args after params" do
+      defmodule Concat do
+        def join(prefix, text), do: {:ok, "#{prefix} #{text}"}
+      end
+
+      result =
+        queue do
+          put(:text, "hello")
+          run(:joined, {Concat, :join, ["world"]}, [:text])
+        end
+        |> Q.exec()
+
+      assert {:ok, %{text: "hello", joined: "hello world"}} = result
+    end
+
+    test "supports param ordering options for MFA calls" do
+      defmodule OrderTest do
+        def concat(first, second), do: {:ok, "#{first}#{second}"}
+      end
+
+      result =
+        queue do
+          put(:text, "!")
+          run(:appended, {OrderTest, :concat, ["world"]}, {[:text], order: :append})
+          run(:prepended, {OrderTest, :concat, ["world"]}, {[:text], order: :prepend})
+        end
+        |> Q.exec()
+
+      assert {:ok, %{
+        text: "!",
+        appended: "world!",   # mfa args first (default)
+        prepended: "!world"   # q params first
+      }} = result
     end
   end
 end

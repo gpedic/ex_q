@@ -154,6 +154,25 @@ Halting is not considered an error and will return an `:ok` tuple will all value
   {:ok, %{user_id: "...", user: %User{}}}
 ```
 
+## DSL Usage
+
+ExQ provides a DSL for creating queues in a more declarative way. To use it, simply import Q and use the `queue` macro:
+
+```elixir
+import Q
+
+decode_q = queue do
+  put(:base64_text, "aGVsbG8=")
+  run(:decoded, &Base.decode64/1, [:base64_text])
+  run(:decoded_mfa, {Base, :decoded64, []}, [:base64_text])
+end
+
+Q.exec(decode_q)
+
+# Returns:
+{:ok, %{base64_text: "aGVsbG8=", decoded: "hello", decoded_mfa: "hello"}}
+```
+
 ## Installation
 
 If [available in Hex](https://hex.pm/docs/publish), the package can be installed

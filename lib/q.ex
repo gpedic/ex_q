@@ -159,6 +159,11 @@ defmodule Q do
   @spec run(t, name, fun_arity1 | fun_mfa, [atom]) :: t
   def run(que, name, fun, params \\ [])
 
+  def run(que, name, {mod, fun, args}, {params, opts})
+      when is_atom(mod) and is_atom(fun) and is_list(args) and is_list(params) and is_list(opts) do
+    add_operation(que, name, {:run, {mod, fun, args, {params, opts}}}, params)
+  end
+
   def run(que, name, {mod, fun, args}, params)
       when is_atom(mod) and is_atom(fun) and is_list(args) do
     add_operation(que, name, {:run, {mod, fun, args, params}}, params)
@@ -197,6 +202,40 @@ defmodule Q do
       when is_atom(mod) and is_atom(fun) and is_list(args) do
     add_operation(que, name, {:run, {mod, fun, args, params}}, params)
   end
+
+  @doc """
+  Provides a DSL for creating a queue using a more declarative syntax.
+  """
+  defmacro queue(do: block) do
+    quote do
+      (fn ->
+        var!(queue) = Q.new()
+        unquote(Macro.prewalk(block, &Q.transform_dsl/1))
+        var!(queue)
+      end).()
+    end
+  end
+
+  @doc false
+  def transform_dsl({:put, _meta, [name, value]}) do
+    quote do
+      var!(queue) = Q.put(var!(queue), unquote(name), unquote(value))
+    end
+  end
+
+  def transform_dsl({:run, _meta, [name, fun, params]}) do
+    quote do
+      var!(queue) = Q.run(var!(queue), unquote(name), unquote(fun), unquote(params))
+    end
+  end
+
+  def transform_dsl({:run, _meta, [name, fun]}) do
+    quote do
+      var!(queue) = Q.run(var!(queue), unquote(name), unquote(fun), [])
+    end
+  end
+
+  def transform_dsl(other), do: other
 
   defp add_operation(%Q{} = que, name, operation, params) do
     %{operations: operations, names: names} = que
@@ -250,8 +289,18 @@ defmodule Q do
   defp apply_operation({:put, value}, _acc),
     do: {:ok, value}
 
-  defp apply_run_fun({mod, fun, args, params}, acc) do
-    apply(mod, fun, build_args(acc, params, args))
+  defp apply_run_fun({mod, fun, args, {params, opts}}, acc) when is_list(opts) and is_list(params) do
+    param_args = build_args(acc, params, [])
+    final_args =
+      case Keyword.get(opts, :order, :prepend) do
+        :prepend -> param_args ++ args
+        :append -> args ++ param_args
+      end
+    apply(mod, fun, final_args)
+  end
+
+  defp apply_run_fun({mod, fun, args, params}, acc) when is_list(params) do
+    apply_run_fun({mod, fun, args, {params, []}}, acc)
   end
 
   defp apply_run_fun({fun, params}, acc) when is_function(fun) do
