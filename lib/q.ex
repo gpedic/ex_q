@@ -209,14 +209,20 @@ defmodule Q do
   defmacro queue(do: block) do
     quote do
       (fn ->
-        var!(queue) = Q.new()
-        unquote(Macro.prewalk(block, &Q.transform_dsl/1))
-        var!(queue)
-      end).()
+         var!(queue) = Q.new()
+         unquote(Macro.prewalk(block, &Q.transform_dsl/1))
+         var!(queue)
+       end).()
     end
   end
 
   @doc false
+  def transform_dsl({:exec, _meta, []}) do
+    quote do
+      var!(queue) = Q.exec(var!(queue))
+    end
+  end
+
   def transform_dsl({:put, _meta, [name, value]}) do
     quote do
       var!(queue) = Q.put(var!(queue), unquote(name), unquote(value))
@@ -232,6 +238,18 @@ defmodule Q do
   def transform_dsl({:run, _meta, [name, fun]}) do
     quote do
       var!(queue) = Q.run(var!(queue), unquote(name), unquote(fun), [])
+    end
+  end
+
+  def transform_dsl({:inspect, _meta, []}) do
+    quote do
+      var!(queue) = Q.inspect(var!(queue))
+    end
+  end
+
+  def transform_dsl({:inspect, _meta, [opts]}) do
+    quote do
+      var!(queue) = Q.inspect(var!(queue), unquote(opts))
     end
   end
 
@@ -289,13 +307,16 @@ defmodule Q do
   defp apply_operation({:put, value}, _acc),
     do: {:ok, value}
 
-  defp apply_run_fun({mod, fun, args, {params, opts}}, acc) when is_list(opts) and is_list(params) do
+  defp apply_run_fun({mod, fun, args, {params, opts}}, acc)
+       when is_list(opts) and is_list(params) do
     param_args = build_args(acc, params, [])
+
     final_args =
       case Keyword.get(opts, :order, :prepend) do
         :prepend -> param_args ++ args
         :append -> args ++ param_args
       end
+
     apply(mod, fun, final_args)
   end
 

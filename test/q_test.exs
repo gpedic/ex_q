@@ -252,9 +252,10 @@ defmodule QTest do
 
   describe "DSL integration" do
     test "queue macro creates valid Q struct" do
-      result = queue do
-        put(:test, "value")
-      end
+      result =
+        queue do
+          put(:test, "value")
+        end
 
       assert %Q{} = result
       assert [test: {:put, "value"}] = Q.to_list(result)
@@ -287,7 +288,10 @@ defmodule QTest do
       result =
         queue do
           put(:input, -1)
-          run(:validate, fn n -> if n > 0, do: {:ok, n}, else: {:error, :invalid_number} end, [:input])
+
+          run(:validate, fn n -> if n > 0, do: {:ok, n}, else: {:error, :invalid_number} end, [
+            :input
+          ])
         end
         |> Q.exec()
 
@@ -300,8 +304,8 @@ defmodule QTest do
           put(:count, 0)
           run(:check, fn n -> if n == 0, do: {:halt, :zero}, else: {:ok, :continue} end, [:count])
           run(:never, fn _ -> {:ok, :should_not_run} end)
+          exec()
         end
-        |> Q.exec()
 
       assert {:ok, %{count: 0, check: :zero}} = result
     end
@@ -311,8 +315,8 @@ defmodule QTest do
         queue do
           put(:base64_text, "aGVsbG8gd29ybGQ=")
           run(:decoded, {Base, :decode64, []}, [:base64_text])
+          exec()
         end
-        |> Q.exec()
 
       assert {:ok, %{base64_text: "aGVsbG8gd29ybGQ=", decoded: "hello world"}} = result
     end
@@ -326,8 +330,8 @@ defmodule QTest do
         queue do
           put(:text, "hello")
           run(:joined, {Concat, :join, ["world"]}, [:text])
+          exec()
         end
-        |> Q.exec()
 
       assert {:ok, %{text: "hello", joined: "hello world"}} = result
     end
@@ -342,14 +346,17 @@ defmodule QTest do
           put(:text, "!")
           run(:appended, {OrderTest, :concat, ["world"]}, {[:text], order: :append})
           run(:prepended, {OrderTest, :concat, ["world"]}, {[:text], order: :prepend})
+          exec()
         end
-        |> Q.exec()
 
-      assert {:ok, %{
-        text: "!",
-        appended: "world!",   # mfa args first (default)
-        prepended: "!world"   # q params first
-      }} = result
+      assert {:ok,
+              %{
+                text: "!",
+                # mfa args first (default)
+                appended: "world!",
+                # q params first
+                prepended: "!world"
+              }} = result
     end
   end
 end
