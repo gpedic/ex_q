@@ -46,9 +46,7 @@ defmodule UploadProcessor do
           end
         end)
       end)
-      run(:enriched, fn %{validated: rows} ->
-        Enum.map_every(rows, 1, &DataProcessor.enrich_data/1)
-      end)
+      run(:enriched, {DataProcessor, :enrich_data, [[use_ai: true]]}, [:validated])
     end
     |> exec()
   end
