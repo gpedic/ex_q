@@ -41,7 +41,7 @@ defmodule Q do
 
   ## Params
 
-  - `que`: The queue to add the value to.
+  - `queue`: The queue to add the value to.
   - `name`: The name to associate with the value. It must be unique, or an error will be raised.
   - `value`: The value to add to the queue.
 
@@ -57,8 +57,8 @@ defmodule Q do
       {:ok, %{params: %{foo: "bar"}}}
   """
   @spec put(t, name, any) :: t
-  def put(que, name, value) do
-    add_operation(que, name, {:put, value}, [])
+  def put(queue, name, value) do
+    add_operation(queue, name, {:put, value}, [])
   end
 
   @doc """
@@ -103,13 +103,13 @@ defmodule Q do
 
   ## Params
 
-  - `que`: The queue to inspect.
+  - `queue`: The queue to inspect.
   - `opts`: Options passed to `IO.inspect/2`. If the `:only` option is provided, only those keys will be printed.
 
   """
   @spec inspect(t, Keyword.t()) :: t
-  def inspect(que, opts \\ []) do
-    Map.update!(que, :operations, &[{:inspect, {:inspect, opts}} | &1])
+  def inspect(queue, opts \\ []) do
+    Map.update!(queue, :operations, &[{:inspect, {:inspect, opts}} | &1])
   end
 
   @doc """
@@ -127,9 +127,9 @@ defmodule Q do
       {:ok, %{write: "Hello world!"}}
   """
   @spec exec(t) :: {:ok, term} | exec_error
-  def exec(%Q{} = que) do
-    Enum.reverse(que.operations)
-    |> apply_operations(que.names)
+  def exec(%Q{} = queue) do
+    Enum.reverse(queue.operations)
+    |> apply_operations(queue.names)
     |> case do
       {name, value, acc} -> {:error, name, value, acc}
       {results, _} -> {:ok, results}
@@ -150,32 +150,32 @@ defmodule Q do
 
   ## Params
 
-  - `que`: The queue to which the function should be added.
+  - `queue`: The queue to which the function should be added.
   - `name`: A unique name for this operation. It will be used as a key in the queue's internal state.
   - `fun`: The function to be run. It can be an anonymous function or a tuple containing a module, function, and arguments.
   - `params` (optional): A list of keys in the queue's internal state that should be passed to the function as arguments.
 
   """
   @spec run(t, name, fun_arity1 | fun_mfa, [atom]) :: t
-  def run(que, name, fun, params \\ [])
+  def run(queue, name, fun, params \\ [])
 
-  def run(que, name, {mod, fun, args}, {params, opts})
+  def run(queue, name, {mod, fun, args}, {params, opts})
       when is_atom(mod) and is_atom(fun) and is_list(args) and is_list(params) and is_list(opts) do
-    add_operation(que, name, {:run, {mod, fun, args, {params, opts}}}, params)
+    add_operation(queue, name, {:run, {mod, fun, args, {params, opts}}}, params)
   end
 
-  def run(que, name, {mod, fun, args}, params)
+  def run(queue, name, {mod, fun, args}, params)
       when is_atom(mod) and is_atom(fun) and is_list(args) do
-    add_operation(que, name, {:run, {mod, fun, args, params}}, params)
+    add_operation(queue, name, {:run, {mod, fun, args, params}}, params)
   end
 
-  def run(que, name, {mod, fun}, params)
+  def run(queue, name, {mod, fun}, params)
       when is_atom(mod) and is_atom(fun) do
-    run(que, name, {mod, fun, []}, params)
+    run(queue, name, {mod, fun, []}, params)
   end
 
-  def run(que, name, fun, params) when is_function(fun) do
-    add_operation(que, name, {:run, {fun, params}}, params)
+  def run(queue, name, fun, params) when is_function(fun) do
+    add_operation(queue, name, {:run, {fun, params}}, params)
   end
 
   @doc """
@@ -190,7 +190,7 @@ defmodule Q do
 
   ## Params
 
-  - `que`: The queue to which the function should be added.
+  - `queue`: The queue to which the function should be added.
   - `name`: A unique name for this operation. It will be used as a key in the queue's internal state.
   - `mod`: The module where the function is defined.
   - `fun`: The function to be executed.
@@ -198,9 +198,9 @@ defmodule Q do
   - `params` (optional): A list of keys in the queue's internal state that should be passed to the function as arguments.
   """
   @spec run(t, name, module, function :: atom, args :: [any], [atom]) :: t
-  def run(que, name, mod, fun, args, params \\ [])
+  def run(queue, name, mod, fun, args, params \\ [])
       when is_atom(mod) and is_atom(fun) and is_list(args) do
-    add_operation(que, name, {:run, {mod, fun, args, params}}, params)
+    add_operation(queue, name, {:run, {mod, fun, args, params}}, params)
   end
 
   @doc """
@@ -262,14 +262,14 @@ defmodule Q do
 
   def transform_dsl(other), do: other
 
-  defp add_operation(%Q{} = que, name, operation, params) do
-    %{operations: operations, names: names} = que
+  defp add_operation(%Q{} = queue, name, operation, params) do
+    %{operations: operations, names: names} = queue
     check_params_existence(names, params)
 
     if MapSet.member?(names, name) do
-      raise "#{Kernel.inspect(name)} is already a member of the Q: \n#{Kernel.inspect(que)}"
+      raise "#{Kernel.inspect(name)} is already a member of the Q: \n#{Kernel.inspect(queue)}"
     else
-      %{que | operations: [{name, operation} | operations], names: MapSet.put(names, name)}
+      %{queue | operations: [{name, operation} | operations], names: MapSet.put(names, name)}
     end
   end
 
