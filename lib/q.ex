@@ -205,6 +205,13 @@ defmodule Q do
 
   @doc """
   Provides a DSL for creating a queue using a more declarative syntax.
+
+  ## Example
+      queue do
+        put(:input, "some data")
+        run(:processed, &process_data/1, [:input])
+        exec()      # optional, will return the result immediately
+      end
   """
   defmacro queue(do: block) do
     quote do
