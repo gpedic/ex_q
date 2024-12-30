@@ -64,6 +64,7 @@ defmodule Q.MixProject do
 
   defp docs() do
     [
+      main: "README.md",
       source_ref: "v#{@version}",
       source_url: @url,
       extras: [
