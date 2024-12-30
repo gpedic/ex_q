@@ -10,16 +10,21 @@ Q provides powerful pipeline composition inspired by Ecto.Multi, preserving each
 ## Why Q?
 
 Q makes data processing pipelines simpler and safer in three key ways:
-* Full Error Context: When something fails, you see all data from every previous step, making errors easy to understand and fix
-* Simple Function Reuse: Use your existing functions as-is. Q handles getting the right data to each function automatically
-* Easy Composition: Build complex pipelines by combining smaller ones, just like regular Elixir functions. Break down large operations while keeping data flow clear
+* **Full Error Context**: When something fails, you see all data from every previous step, making errors easy to understand and fix
+
+* **Simple Function Reuse**: Use your existing functions as-is. Q handles getting the right data to each function automatically
+
+* **Easy Composition**: Build complex pipelines by combining smaller ones, just like regular Elixir functions. Break down large operations while keeping data flow clear
 
 ## Additional benefits of Q
 
-* Explicit State Management: Every step's output is preserved and labeled, making it easy to understand and audit your data's transformation journey
-* Flexible Parameter Passing: Choose between passing the full state map or specific parameters to each function, adapting to your needs without changing the function itself
-* Early Exit Support: Gracefully handle conditional processing with the ability to halt execution early when appropriate, while still maintaining access to all processed data
-* Pipeline Visibility: The queue structure makes it clear what operations will be performed and in what order, improving maintainability
+* **Explicit State Management**: Every step's output is preserved and labeled, making it easy to understand and audit your data's transformation journey
+
+* **Flexible Parameter Passing**: Choose between passing the full state map or specific parameters to each function, adapting to your needs without changing the function itself
+
+* **Early Exit Support**: Gracefully handle conditional processing with the ability to halt execution early when appropriate, while still maintaining access to all processed data
+
+* **Pipeline Visibility**: The queue structure makes it clear what operations will be performed and in what order, improving maintainability
 
 ## Example
 
