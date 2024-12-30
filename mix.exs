@@ -1,7 +1,7 @@
 defmodule Q.MixProject do
   use Mix.Project
 
-  @name "ExQ"
+  @name "Q"
   @version "1.1.0"
   @url "https://github.com/gpedic/ex_q"
 
@@ -30,8 +30,8 @@ defmodule Q.MixProject do
 
   defp description do
     """
-    ExQ provides a way of queuing the execution of operations and aggregates all returned values similar to `Ecto.Multi`.
-    Operations are queued and executed in FIFO order.
+    Q provides powerful pipeline composition inspired by Ecto.Multi,
+    preserving each operation's output for full visibility of your pipeline's state — including when something goes wrong.
     """
   end
 
@@ -67,7 +67,8 @@ defmodule Q.MixProject do
       source_ref: "v#{@version}",
       source_url: @url,
       extras: [
-        "README.md"
+        "README.md": [title: "Overview"],
+        "LICENSE": [title: "License"]
       ]
     ]
   end
