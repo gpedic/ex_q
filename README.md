@@ -10,9 +10,9 @@ Q provides powerful pipeline composition inspired by Ecto.Multi, preserving each
 ## Why Q?
 
 Q makes data processing pipelines simpler and safer in three key ways:
-* **Full Error Context**: When something fails, you see all data from every previous step, making errors easy to understand and fix
+* **Full Error Context**: When something fails, you see all data from every previous step, making errors easier to understand and fix
 
-* **Simple Function Reuse**: Use your existing functions as-is. Q handles getting the right data to each function automatically
+* **Simple Function Reuse**: Use your existing functions as-is in most cases. Q allows you to choose which parts of the state are passed to function arguments at each step of the pipeline
 
 * **Easy Composition**: Build complex pipelines by combining smaller ones, just like regular Elixir functions. Break down large operations while keeping data flow clear
 
@@ -24,7 +24,7 @@ Q makes data processing pipelines simpler and safer in three key ways:
 
 * **Early Exit Support**: Gracefully handle conditional processing with the ability to halt execution early when appropriate, while still maintaining access to all processed data
 
-* **Pipeline Visibility**: The queue structure makes it clear what operations will be performed and in what order, improving maintainability
+* **Visibility**: The queue structure makes it clear what operations will be performed and in what order, improving maintainability
 
 ## Example
 
