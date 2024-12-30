@@ -3,155 +3,214 @@
 [![License](https://img.shields.io/hexpm/l/ex_q.svg)](https://github.com/gpedic/ex_q/blob/master/LICENSE.md)
 [![Last Updated](https://img.shields.io/github/last-commit/gpedic/ex_q.svg)](https://github.com/gpedic/ex_q/commits/master)
 
+# Q
 
-# ExQ
+Q provides powerful pipeline composition inspired by Ecto.Multi, preserving each operation's output for full visibility of your pipeline's state — including when something goes wrong.
 
-ExQ provides a powerful way to queue and execute operations while aggregating all returned values, similar to `Ecto.Multi`.
-Operations are executed in a first-in-first-out (FIFO) order.
+## Why Q?
 
-Functions can specify the keys they require from the queue's accumulated data via the `params` argument in the `run` function. By specifying params that way the called function does not have to be aware of the aggregate data structure.
+Q makes data processing pipelines simpler and safer in three key ways:
+* Full Error Context: When something fails, you see all data from every previous step, making errors easy to understand and fix
+* Simple Function Reuse: Use your existing functions as-is. Q handles getting the right data to each function automatically
+* Easy Composition: Build complex pipelines by combining smaller ones, just like regular Elixir functions. Break down large operations while keeping data flow clear
 
-In the following example, the write step will receive only the location since it is requested as param.
-Params will be provided in the order they are specified.
+## Additional benefits of Q
 
-On the other hand in the fail step, we can match the aggregate data since no params are specified.
+* Explicit State Management: Every step's output is preserved and labeled, making it easy to understand and audit your data's transformation journey
+* Flexible Parameter Passing: Choose between passing the full state map or specific parameters to each function, adapting to your needs without changing the function itself
+* Early Exit Support: Gracefully handle conditional processing with the ability to halt execution early when appropriate, while still maintaining access to all processed data
+* Pipeline Visibility: The queue structure makes it clear what operations will be performed and in what order, improving maintainability
+
+## Example
+
+Here's a practical example showing data validation and transformation:
 
 ```elixir
-    iex> pipeline = Q.new()
-    |> Q.put(:location, "Space")
-    |> Q.run(:write, fn location -> {:ok, "#{location} the final frontier."} end, [:location])
+defmodule UploadProcessor do
+  import Q
 
-    iex> pipeline |> Q.exec()
-
-    {:ok, %{location: "Space", write: "Space the final frontier."}}
-
-    iex> pipeline 
-    |> Q.run(:fail, fn %{write: _write} -> {:error, :been_there_before} end)
-    |> Q.exec()
-
-    {:error, :write, :been_there_before, %{location: "Space", write: "Space the final frontier"}}
-
-```
-
-## Why use Q?
-
-One of the major benefits of using ExQ is that it provides access to the results of all steps before an error occurs, making it easy to identify the step that produced the error.
-
-Consider the following two code snippets which use the Blog module to do some work:
-```elixir
-  defmodule Blog do
-    def fetch_user(user_id) do
-      {:ok, %User{id: user_id, name: "John Doe"}}
+  def process_upload(file_data) do
+    queue do
+      put(:file_data, file_data)
+      run(:parsed, &DataProcessor.parse_csv/1, [:file_data])
+      run(:validated, fn %{parsed: rows} ->
+        Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, acc} ->
+          case DataProcessor.validate_row(row) do
+            {:ok, valid} -> {:cont, {:ok, [valid | acc]}}
+            {:error, _} = err -> {:halt, err}
+          end
+        end)
+      end)
+      run(:enriched, fn %{validated: rows} ->
+        Enum.map_every(rows, 1, &DataProcessor.enrich_data/1)
+      end)
     end
-
-    def create_post(user, content, opts \\ []) do
-      upcase = Keyword.get(opts, :upcase, false)
-
-      if upcase do
-        insert_post(user, String.upcase(content))
-      else
-        insert_post(user, content)
-      end
-    end
-
-    def count_posts(user) do
-      {:ok, get_post_count(user)}
-    end
+    |> exec()
   end
+end
+```
+
+## Error handling
+
+One of the major benefits of using Q is that it provides a complete context even in case of errors - you know exactly what step failed and have access to all previous results
+
+```elixir
+def process_data(data) do
+  queue do
+    put(:raw_data, data)
+    run(:decoded, &Jason.decode/1, [:raw_data])
+    run(:validated, &validate_schema/1, [:decoded])
+    run(:normalized, &normalize_data/1, [:validated])
+    run(:enriched, &add_metadata/1, [:normalized])
+    exec()
+  end
+end
+
+# If JSON parsing fails
+{:error, :decoded, %Jason.DecodeError{data: "invalid", position: 0, token: nil}, %{raw_data: "invalid"}}
+
+# If validation fails, notice both previous processing steps results are available
+{:error, :validated, :invalid_schema, %{
+  raw_data: "{\"foo\": 123}",
+  decoded: %{"foo" => 123}
+}}
 
 ```
 
-### Without ExQ
+### Without Q
 ```elixir
-  user_id = 1234
-  with {:ok, user} <- Blog.fetch_user(user_id),
-    {:ok, post} <- Blog.create_post(user, "test") do
-    broadcast(post)
+def process_data_without_q(data) do
+  with {:ok, decoded} <- Jason.decode(data),
+    {:ok, validated} <- validate_data(data),
+    {:ok, transformed} <- normalize_data(validated),
+    {:ok, enriched} <- add_metadata(transformed) do
+    {:ok, enriched}
   else
-    {:error, :create_post_failed} = error ->
-      Logger.error("Failed to create post for user #{user_id}")
-      error
-    {:error, error} = error ->
-      Logger.error(error)
-      error
+    {:error, reason} -> 
+      # We know the failure reason, but not the state when it failed
+      # as the data from of processing steps is not available here
+      {:error, reason}
   end
+end
 ```
-### Note
-* When `with` is used on its own the return of the `user` step is not available for error handling if create_post fails
-* To match a specific error in `else` requires workarounds e.g. `create_post/2` returning a special error tuple
 
-### With ExQ
+## Parameter Passing
+
+Functions in Q can receive parameters in two ways:
+
+1. Full context - by default, functions receive the entire state as a map
+2. Specific params - by providing a list of operation keys, functions receive only those values as function arguments in the order they are specified
 
 ```elixir
-  ex_que = Q.new()
-  |> Q.put(:content, "hello world")
-  |> Q.run(:user, fn %{user_id: id} -> Blog.fetch_user(id) end)
-  |> Q.run(:post, Blog, :create_post, [[upcase: true]], [:user, :content])
-  |> Q.run(:post_count, &Blog.count_posts/1, [:user])
+defmodule ParamDemo do
+  import Q
 
-  with {:ok, %{post: post}} <- Q.exec(ex_que) do
-    broadcast(post)
-  else
-    {:error, :post, failed_value, %{user: user}} ->
-      Logger.error("Failed to create post for user #{user.id}")
-      {:error, failed_value}
-    {:error, failed_operation, failed_value, _changes_so_far} ->
-      Logger.error("Operation #{failed_operation} failed, #{inspect(failed_value)}")
-      {:error, failed_value}
+  def run_stuff(data) do
+    queue do
+      # Store some data for subsequent steps
+      put(:some_data, data)
+
+      # Pass a single argument from the state
+      run(:single_arg, &MyModule.process_single/1, [:some_data])
+
+      # Pass the complete state
+      run(:custom_extract, fn %{single_arg: val} ->
+        MyModule.do_something(val)
+      end)
+
+      # Pass a multiple arguments from the state
+      run(:multi_arg, &MyModule.process_multiple/1, [:custom_extract, :some_data])
+
+      # The mfa version allows us to pass additional params directly
+      # by default args will be prepended i.e.
+      # MyModule.delete(single_arg, some_data, soft_delete: true)
+      run(:prepend_args, {MyModule, :delete, [[soft_delete: true]]}, [:single_arg, :some_data])
+
+      # To append the arguments instead we can define the order
+      # MyModule.changeset(%MyStruct{}, single_arg, some_data)
+      run(:appended_args, {MyModule, :changeset, [%MyStruct{}]}, {[:single_arg, :some_data], order: :append})
+    end
   end
+end
 ```
-### Note
-* With ExQ the `user` result is available for error handling if `create_post` fails
-* We can also handle errors for specific steps while `create_post/2` can return a standard error tuple like `{:error, "msg"}`
 
-## Using params in Functions
+## Halting Execution Early
 
-The run function has an optional params argument, which is a list of keys. When provided, the function only receives the values associated with these keys as arguments. If params are not provided, the function receives the entire accumulated data. The keys in params must exist before being used.
-
-The params are provided to the function in order, and any additional arguments are passed after the params.
+Functions can return `{:halt, value}` to stop execution early with a success state. This is useful for conditional processing where early termination is a valid outcome.
 
 ```elixir
-    defmodule Test do
-      def print(val, opts \\ []) do
-        upcase? = Keyword.get(opts, :upcase, false)
-        if upcase? do
-          String.upcase(val)
-        else
-          val
+    defmodule ExpensiveProcessor do
+      import Q
+
+      def process_data(input) do
+        queue do
+          put(:input, input)
+          
+          # Check cache first
+          run(:cache_check, fn %{key: key} ->
+            cached = get_from_cache(key)
+            if not is_nil(cached) do
+              {:halt, cached}  # Skip expensive operation if cached
+            else
+              {:ok, :not_found}
+            end
+          end)
+
+          # Only runs if not in cache
+          run(:processed, &expensive_operation/1, [:input])
+          run(:cache, &cache_processed_data/1, [:processed])
+
+          exec()
         end
-        |> IO.inspect()
       end
-    end
 
-    iex> pipeline = Q.new()
-    |> Q.put(:init, %{start: "To boldly go"})
-    |> Q.run(:go, fn %{start: val} -> {:ok, "#{val} where no man has gone before"} end, [:init])
-    |> Q.run(:print, {Test, :write, [upcase: true]}, [:go])
-    |> Q.exec()
+  # halt early on cache hit
+  {:ok, %{
+        input: %{key: "BWBeN28Vb7cMEx7Ym8AUzs", data: %{...}},
+        cache_check: %{data: %{...}}
+      }
 
-    {:ok, %{init: %{start: "To boldly go"}, read: "To boldly go where no man has gone before", print: "TO BOLDLY GO WHERE NO MAN HAS GONE BEFORE"}}
+  # run full pipeline when not cached
+    {:ok, %{
+        input: %{key: "BWBeN28Vb7cMEx7Ym8AUzs", data: %{...}},
+        cache_check: :not_found
+        processed: %{data: %{...}}
+        cache: :ok
+      }
 ```
 
-## Halting execution early
-Return `{:halt, value}` to halt execution at any point.
-Halting is not considered an error and will return an `:ok` tuple will all values computed before halting.
+## API
+
+Q provides both a functional API and a DSL for creating queues. Here are both approaches side by side:
 
 ```elixir
-  iex> Q.new()
-  |> Q.put(:user_id, "f68b7f42-d343-48e4-8f76-c434fab0ba1a")
-  |> Q.run(:user, &Blog.fetch_user/1, [:user_id])
-  |> Q.run(:earned_daily_award, fn %{user: user} ->
-      count = Blog.count_posts_today(user)
-      if count < 1 do
-        {:halt, false}
-      else
-        {:ok, true}
-      end
-  end)
-  |> Q.run(:send_daily_award, Blog, :send_daily_award, [])
-  |> Q.exec()
+import Q
 
-  {:ok, %{user_id: "...", user: %User{}}}
+# DSL
+decode_q = queue do
+  put(:base64_text, "aGVsbG8=")
+  run(:decoded, &Base.decode64/1, [:base64_text])
+  run(:decoded_mfa, {Base, :decoded64, []}, [:base64_text])
+end
+
+exec(decode_q)
+
+# Returns:
+{:ok, %{base64_text: "aGVsbG8=", decoded: "hello", decoded_mfa: "hello"}}
+```
+
+```elixir
+# Functional
+decode_q = Q.new()
+  |> Q.put(:base64_text, "aGVsbG8=")
+  |> Q.run(:decoded, &Base.decode64/1, [:base64_text])
+  |> Q.run(:decoded_mfa, {Base, :decoded64, []}, [:base64_text])
+
+
+Q.exec(decode_q)
+
+# Returns:
+{:ok, %{base64_text: "aGVsbG8=", decoded: "hello", decoded_mfa: "hello"}}
 ```
 
 ## Installation
@@ -162,7 +221,7 @@ by adding `ex_q` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:ex_q, "~> 1.0"}
+    {:ex_q, "~> 1.1"}
   ]
 end
 ```
