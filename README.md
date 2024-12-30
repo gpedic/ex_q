@@ -135,6 +135,7 @@ defmodule ParamDemo do
       # MyModule.changeset(%MyStruct{}, single_arg, some_data)
       run(:appended_args, {MyModule, :changeset, [%MyStruct{}]}, {[:single_arg, :some_data], order: :append})
     end
+    |> exec()
   end
 end
 ```
