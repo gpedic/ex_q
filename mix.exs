@@ -68,7 +68,7 @@ defmodule Q.MixProject do
       source_url: @url,
       extras: [
         "README.md": [title: "Overview"],
-        "LICENSE": [title: "License"]
+        LICENSE: [title: "License"]
       ]
     ]
   end
