@@ -1,8 +1,8 @@
 defmodule Q do
   @moduledoc """
-    ExQ
+    Q
 
-    Documentation for `ExQ`.
+    Documentation for `Q`.
   """
 
   alias __MODULE__

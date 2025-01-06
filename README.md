@@ -5,30 +5,23 @@
 
 # Q
 
-Q provides powerful pipeline composition inspired by Ecto.Multi, preserving each operation's output for full visibility of your pipeline's state — including when something goes wrong.
+Q is a tool for building and executing pipelines of operations, influenced by Ecto.Multi. It preserves all intermediate results so that you retain clarity and visibility into your data transformations at each step. When a pipeline fails, you can see precisely which step broke and what the state looked like at that point.
 
 ## Why Q?
 
-Q makes data processing pipelines simpler and safer in three key ways:
-* **Full Error Context**: When something fails, you see all data from every previous step, making errors easier to understand and fix
+Q simplifies building pipelines in three key ways:
 
-* **Simple Function Reuse**: Use your existing functions as-is in most cases. Q allows you to choose which parts of the state are passed to function arguments at each step of the pipeline
+* **Never lose context**: Q like Ecto.Multi will always return all executed steps results. When a step breaks, Q returns all prior step results along with the failing step’s error.
 
-* **Easy Composition**: Build complex pipelines by combining smaller ones, just like regular Elixir functions. Break down large operations while keeping data flow clear
+* **Control passed parameters**: Steps can operate on the entire pipeline state or on specific labels only. This reduces the need to rewrite functions to suite the pipeline or having to introduce anonyomous functions just to be able to pick the parameters.
 
-## Additional benefits of Q
+* **Flexible Composition**: Q queues can be composed just like normal Elixir functions. Smaller pipelines can be combined to form larger ones.
 
-* **Explicit State Management**: Every step's output is preserved and labeled, making it easy to understand and audit your data's transformation journey
-
-* **Flexible Parameter Passing**: Choose between passing the full state map or specific parameters to each function, adapting to your needs without changing the function itself
-
-* **Early Exit Support**: Gracefully handle conditional processing with the ability to halt execution early when appropriate, while still maintaining access to all processed data
-
-* **Visibility**: The queue structure makes it clear what operations will be performed and in what order, improving maintainability
 
 ## Example
 
-Here's a practical example showing data validation and transformation:
+A pipeline (or “queue”) is a collection of labeled steps that transform data. Each step can take the entire pipeline state or selected portions of it. 
+Results are always labeled and retained:
 
 ```elixir
 defmodule UploadProcessor do
@@ -55,7 +48,7 @@ end
 
 ## Error handling
 
-One of the major benefits of using Q is that it provides a complete context even in case of errors - you know exactly what step failed and have access to all previous results
+One of the major benefits of using Q is that it provides a complete context even in case of errors - you know not only which step failed but have access to all results leading up to the error.
 
 ```elixir
 def process_data(data) do
@@ -99,10 +92,7 @@ end
 
 ## Parameter Passing
 
-Functions in Q can receive parameters in two ways:
-
-1. Full context - by default, functions receive the entire state as a map
-2. Specific params - by providing a list of operation keys, functions receive only those values as function arguments in the order they are specified
+Every step function will receive the entire pipeline state by default, or you can list which keys you want to pass as function arguments.
 
 ```elixir
 defmodule ParamDemo do
@@ -140,7 +130,7 @@ end
 
 ## Halting Execution Early
 
-Functions can return `{:halt, value}` to stop execution early with a success state. This is useful for conditional processing where early termination is a valid outcome.
+Sometimes you don’t need the remaining steps once a certain condition is met. Q allows functions to return `{:halt, value}` to end the pipeline successfully:
 
 ```elixir
     defmodule ExpensiveProcessor do
@@ -185,12 +175,13 @@ Functions can return `{:halt, value}` to stop execution early with a success sta
 
 ## API
 
-Q provides both a functional API and a DSL for creating queues. Here are both approaches side by side:
+Q provides two styles, the DSL and a more functional chaining API.
+Here are both approaches side by side.
 
+### DSL
 ```elixir
 import Q
 
-# DSL
 decode_q = queue do
   put(:base64_text, "aGVsbG8=")
   run(:decoded, &Base.decode64/1, [:base64_text])
@@ -203,8 +194,8 @@ exec(decode_q)
 {:ok, %{base64_text: "aGVsbG8=", decoded: "hello", decoded_mfa: "hello"}}
 ```
 
+### Functional
 ```elixir
-# Functional
 decode_q = Q.new()
   |> Q.put(:base64_text, "aGVsbG8=")
   |> Q.run(:decoded, &Base.decode64/1, [:base64_text])
