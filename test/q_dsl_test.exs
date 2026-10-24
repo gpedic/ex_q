@@ -327,14 +327,14 @@ defmodule Q.DSLTest do
       assert {:ok, %{cached: true, hit: :cached}} = result
     end
 
-    test "compiles to merge" do
+    test "compiles to a branch" do
       q =
         queue do
           a = 1
           if a > 0, do: b = 2
         end
 
-      assert [let: :a, merge: nil] = Q.to_list(q)
+      assert [let: :a, branch: nil] = Q.to_list(q)
     end
   end
 

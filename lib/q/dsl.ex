@@ -88,9 +88,9 @@ defmodule Q.DSL do
     {ast, {bound, steps}}
   end
 
-  # A conditional runs as a merge: the branch taken builds the queue of its steps.
-  # Outer steps the conditional references become params of the merge function,
-  # so inside the branches they're plain variables.
+  # A conditional runs as a branch op: the branch taken builds the queue of its
+  # steps. Outer steps the conditional references become params of the branch
+  # function, so inside the branches they're plain variables.
   defp compile_statement({kind, meta, args} = conditional, bound, steps, caller)
        when kind in @conditionals and is_list(args) do
     {branches, branch_names} = compile_branches(kind, args, bound, caller)
@@ -98,7 +98,7 @@ defmodule Q.DSL do
 
     ast =
       quote do
-        queue = Q.merge(queue, unquote(fun), unquote(params))
+        queue = Q.__branch__(queue, unquote(fun), unquote(params))
       end
 
     {ast, {branch_names ++ bound, steps}}

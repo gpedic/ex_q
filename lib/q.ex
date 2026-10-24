@@ -62,7 +62,7 @@ defmodule Q do
   @type step_fun :: (... -> result)
   @type fun_mfa :: {module, atom, [any]} | {module, atom}
   @type params :: [name] | {[name], [order: :prepend | :append]}
-  @type kind :: :put | :run | :let | :merge | :debug
+  @type kind :: :put | :run | :let | :merge | :branch | :debug
   @type exec_error :: {:error, name, any, state}
   @typep input :: :none | :state | {:keys, [name]}
   @typep call :: {:fun, function, input} | {:mfa, module, atom, [any], input, :prepend | :append}
@@ -70,6 +70,7 @@ defmodule Q do
            {:step, name, :put, any}
            | {:step, name, :run | :let, call}
            | {:merge, call}
+           | {:branch, call}
            | {:debug, Keyword.t()}
 
   @doc """
@@ -135,6 +136,7 @@ defmodule Q do
     |> Enum.map(fn
       {:step, name, kind, _} -> {kind, name}
       {:merge, _call} -> {:merge, nil}
+      {:branch, _call} -> {:branch, nil}
       {:debug, _opts} -> {:debug, nil}
     end)
   end
@@ -292,6 +294,14 @@ defmodule Q do
   @spec merge(t, (... -> t) | fun_mfa, params) :: t
   def merge(%Q{} = queue, fun, params \\ []) do
     %{add_op(queue, {:merge, build_call!(queue, fun, params)}) | merged: true}
+  end
+
+  # Runs the steps of a conditional in a queue/1 block: the branch taken builds a
+  # queue, whose results are added to the state as if its steps were written
+  # inline. Only the DSL calls this.
+  @doc false
+  def __branch__(%Q{} = queue, fun, params) do
+    add_op(queue, {:branch, build_call!(queue, fun, params)})
   end
 
   @doc """
@@ -471,7 +481,7 @@ defmodule Q do
     {:cont, {:ok, store!(state, name, call(call, state))}}
   end
 
-  defp run_op({:merge, call}, {:ok, state}) do
+  defp run_op({kind, call}, {:ok, state}) when kind in [:merge, :branch] do
     case call(call, state) do
       %Q{operations: operations} ->
         case run_ops(Enum.reverse(operations), %{}) do
@@ -486,7 +496,7 @@ defmodule Q do
         end
 
       other ->
-        raise "expected the merge function to return a Q, got: #{Kernel.inspect(other)}"
+        raise "expected the #{kind} function to return a Q, got: #{Kernel.inspect(other)}"
     end
   end
 
