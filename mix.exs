@@ -10,7 +10,7 @@ defmodule Q.MixProject do
       app: :ex_q,
       name: @name,
       version: @version,
-      elixir: "~> 1.10",
+      elixir: "~> 1.15",
       docs: docs(),
       description: description(),
       source_url: @url,
