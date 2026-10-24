@@ -31,7 +31,8 @@ Also new in the block:
 - `name = expr` stores a value or the result of a function that can't fail; `<-` is for functions returning `{:ok, value}` or `{:error, reason}`.
 - `if`, `unless`, `case` and `cond` around steps choose which steps run, based on earlier results.
 - `_ = expr` and `_name <- expr` run a step without storing its result.
-- `merge(expr)` runs a queue built elsewhere.
+- A step whose function returns a queue runs it as a sub-pipeline, with its results stored as a map under the step's name; `name <- queue do ... end` nests a block inline.
+- A halt stops the whole pipeline, also from inside a sub-pipeline; `{:halt, value, propagate: false}` stops only the queue the step is in.
 - Mistakes, such as binding a name twice, are compile errors pointing at the line.
 
 ### Functional API
@@ -39,7 +40,7 @@ Also new in the block:
 New:
 
 - **`let/4`**: a step for functions that can't fail. The return value is stored as is, so `let(:upper, &String.upcase/1, [:text])` needs no `{:ok, _}` wrapping.
-- **`merge/3`**: adds steps at run time, chosen by a function of earlier results. It works like `Ecto.Multi.merge/2`.
+- **Child queues**: a `run/4` function may return a queue, which runs as a child with its result map stored under the step's name. A failing child step is reported as `{:error, step, {:error, child_step, reason, child_state}, state}`. A child's halt stops the parent too, unless it is `{:halt, value, propagate: false}`.
 - **Arity-0 steps**: an anonymous function of arity 0 without params is called with no arguments.
 - **Unstored steps**: steps named with an atom starting with `_` run, but their result isn't stored and the name can repeat.
 - **Step functions are validated when added**: an anonymous function's arity must match its params, and a `{module, function, args}` function must exist. Mistakes raise `ArgumentError` when the step is added instead of failing when the pipeline runs.

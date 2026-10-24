@@ -142,6 +142,8 @@ end
 {:ok, %{request: %{key: "BWBeN28Vb7cMEx7Ym8AUzs", ...}, cached: :not_found, processed: %{...}}}
 ```
 
+A halt stops the whole pipeline, also from inside a [sub-pipeline](#sub-pipelines). Return `{:halt, value, propagate: false}` to stop only the queue the step is in.
+
 ## Branching
 
 Wrap steps in `if`, `unless`, `case` or `cond` to choose which steps run based on earlier results:
@@ -161,15 +163,50 @@ end
 
 Steps in the branch that runs are added to the result, and an error or halt in them stops the pipeline like any other step. As with variables in Elixir, a step bound inside a branch can't be used after the conditional.
 
-A conditional compiles to `merge`, which works like `Ecto.Multi.merge`: a function of the results so far returns a queue, whose steps run next with their own state. `merge` is also a statement, to include a queue built by another function:
+## Sub-pipelines
+
+A step whose function returns a queue runs it as a child, and stores the child's results as a map under the step's name. The child's step names stay separate from the parent's, so a queue built by a function can be reused anywhere:
 
 ```elixir
+def billing_steps(user) do
+  queue do
+    validated <- Billing.validate(user)
+    invoice <- Billing.invoice(validated)
+  end
+end
+
+def shipping_steps(user) do
+  queue do
+    validated <- Shipping.validate(user)
+    tracking <- Shipping.book(validated)
+  end
+end
+
 queue do
   user <- Accounts.fetch_user(id)
-  merge(onboarding_steps(user))
+  billing <- billing_steps(user)
+  shipping <- shipping_steps(user)
+  confirmation <- confirm(billing.invoice, shipping.tracking)
   exec()
 end
+
+# {:ok, %{
+#   user: ...,
+#   billing: %{validated: ..., invoice: ...},
+#   shipping: %{validated: ..., tracking: ...},
+#   confirmation: ...
+# }}
 ```
+
+Both children use `validated` without conflict. A child runs with its own state, so it gets its inputs as arguments, like `user` above. A block can also be nested inline: `billing <- queue do ... end`.
+
+If a child step fails, the parent step fails and the reason is the child's error tuple, with the child's results up to the failure:
+
+```elixir
+{:error, :billing, {:error, :invoice, :declined, %{validated: ...}}, %{user: ...}}
+```
+
+To store a queue as a value instead of running it, use `=` or return `{:ok, queue}`.
 
 ## Debugging
 
@@ -189,7 +226,7 @@ end
 
 ## Rules
 
-* Every statement in a `queue` block is a step (`name = expr` or `name <- expr`), `debug()`, `merge(queue)`, a conditional containing steps, or `exec()` as the last statement. Use `_ = expr` to run an expression without storing its result.
+* Every statement in a `queue` block is a step (`name = expr` or `name <- expr`), `debug()`, a conditional containing steps, or `exec()` as the last statement. Use `_ = expr` to run an expression without storing its result.
 * The left side of a step is a single variable, and each name is bound once. Names starting with `_` aren't stored and can repeat.
 * Mistakes are compile errors pointing at the line.
 
@@ -205,7 +242,7 @@ end)
 |> Q.exec()
 ```
 
-Here a step's inputs are listed explicitly: `decoded <- Base.decode64(trimmed)` in a `queue` block is `Q.run(q, :decoded, &Base.decode64/1, [:trimmed])`. See the [documentation](https://hexdocs.pm/ex_q/Q.html) for `put/3`, `run/4`, `let/4`, `merge/3` and `debug/2`.
+Here a step's inputs are listed explicitly: `decoded <- Base.decode64(trimmed)` in a `queue` block is `Q.run(q, :decoded, &Base.decode64/1, [:trimmed])`, and `billing <- billing_steps(user)` is `Q.run(q, :billing, &billing_steps/1, [:user])`. See the [documentation](https://hexdocs.pm/ex_q/Q.html) for `put/3`, `run/4`, `let/4` and `debug/2`.
 
 A queue is a plain value, so functions that add steps to it compose like any other function:
 
