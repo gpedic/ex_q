@@ -15,7 +15,7 @@ Q simplifies building pipelines in three key ways:
 
 * **Control passed parameters**: Steps can operate on the entire pipeline state or on specific labels only. This reduces the need to rewrite functions to suit the pipeline or having to introduce anonymous functions just to be able to pick the parameters.
 
-* **Flexible Composition**: Q queues can be composed just like normal Elixir functions. Smaller pipelines can be combined to form larger ones.
+* **Flexible Composition**: Q queues are plain values, so functions that add steps to a queue can be piped together to form larger pipelines (see [Composition](#composition)).
 
 
 ## Example
@@ -72,6 +72,8 @@ end
 }}
 
 ```
+
+Steps can return `{:error, reason}` or a bare `:error`, so functions like `Base.decode64/1` or `Map.fetch/2` work as steps without wrapping. A bare `:error` is reported as `{:error, step, :error, state}`.
 
 ### Without Q
 ```elixir
@@ -180,7 +182,7 @@ Here are both approaches side by side.
 
 ### DSL
 ```elixir
-import Q, only: [queue: 1, exec: 1]
+import Q
 
 decode_q = queue do
   put(:base64_text, "aGVsbG8=")
@@ -208,12 +210,41 @@ Q.exec(decode_q)
 {:ok, %{base64_text: "aGVsbG8=", decoded: "hello", decoded_mfa: "hello"}}
 ```
 
+### Composition
+
+A queue is a plain value, so a function that takes a queue and adds steps to it composes like any other function:
+
+```elixir
+def parse(q), do: Q.run(q, :parsed, &CSV.parse/1, [:file])
+def validate(q), do: Q.run(q, :validated, &validate_rows/1, [:parsed])
+
+Q.new()
+|> Q.put(:file, data)
+|> parse()
+|> validate()
+|> Q.exec()
+```
+
+### Debugging
+
+`debug/2` (`debug()` in the DSL) prints the state at that point of the pipeline when it runs. Pass `only:` to print selected keys:
+
+```elixir
+Q.new()
+|> Q.put(:a, 1)
+|> Q.put(:b, 2)
+|> Q.debug(only: :a)
+|> Q.exec()
+
+# Prints:
+%{a: 1}
+```
+
 ### DSL limitations
 
-* Only the top-level statements of a `queue` block are DSL calls. Calls inside step functions are left alone, so `inspect/1` or a local `put/2` inside a `fn` behave as usual.
-* Steps can't be added conditionally: a `put`, `run`, `inspect` or `exec` inside `if`, `case` or another expression raises at compile time. Build the queue with the functional API when steps depend on runtime conditions.
+* Only the top-level statements of a `queue` block are DSL calls. Calls inside step functions are left alone, so a local `put/2` inside a `fn` behaves as usual.
+* Steps can't be added conditionally: a `put`, `run`, `debug` or `exec` inside `if`, `case` or another expression raises at compile time. Build the queue with the functional API when steps depend on runtime conditions.
 * `exec()` must be the last statement in the block.
-* `import Q` also imports `Q.inspect/2`, which clashes with `Kernel.inspect/2` in the importing module. Import only what you use, e.g. `import Q, only: [queue: 1, exec: 1]`.
 
 ## Installation
 
@@ -222,9 +253,11 @@ Add `ex_q` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:ex_q, "~> 1.2"}
+    {:ex_q, "~> 2.0"}
   ]
 end
 ```
+
+Upgrading from 1.x? See the [changelog](CHANGELOG.md).
 
 Documentation can be found at [https://hexdocs.pm/ex_q](https://hexdocs.pm/ex_q).

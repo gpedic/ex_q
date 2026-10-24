@@ -2,7 +2,7 @@ defmodule Q.MixProject do
   use Mix.Project
 
   @name "Q"
-  @version "1.2.0"
+  @version "2.0.0"
   @url "https://github.com/gpedic/ex_q"
 
   def project do
@@ -60,7 +60,7 @@ defmodule Q.MixProject do
   defp package do
     [
       name: :ex_q,
-      files: ["lib", "mix.exs", "README*", "LICENSE*"],
+      files: ["lib", "mix.exs", "README*", "CHANGELOG*", "LICENSE*"],
       maintainers: ["Goran Pedić"],
       licenses: ["MIT"],
       links: %{"GitHub" => @url}
@@ -72,8 +72,10 @@ defmodule Q.MixProject do
       main: "readme",
       source_ref: "v#{@version}",
       source_url: @url,
+      skip_undefined_reference_warnings_on: ["CHANGELOG.md"],
       extras: [
         "README.md": [title: "Overview"],
+        "CHANGELOG.md": [title: "Changelog"],
         LICENSE: [title: "License"]
       ]
     ]
