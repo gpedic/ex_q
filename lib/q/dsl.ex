@@ -77,15 +77,13 @@ defmodule Q.DSL do
     {ast, {bound, steps}}
   end
 
-  defp compile_statement({:merge, _meta, [expr]}, bound, steps, _caller) do
-    {fun, params} = step_fun(expr, steps)
-
-    ast =
-      quote do
-        queue = Q.merge(queue, unquote(fun), unquote(params))
-      end
-
-    {ast, {bound, steps}}
+  defp compile_statement({:merge, meta, [_expr]}, _bound, _steps, caller) do
+    compile_error!(
+      caller,
+      meta,
+      "merge(queue) is not a statement; run a queue as a step with `name <- queue`, " <>
+        "its results are stored under `name`"
+    )
   end
 
   # A conditional runs as a branch op: the branch taken builds the queue of its

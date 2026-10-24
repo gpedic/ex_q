@@ -30,9 +30,31 @@ defmodule Q do
     * `{:ok, value}` - stores `value` under the step's name and continues
     * `{:error, reason}` - stops; `exec/1` returns `{:error, name, reason, state}`
     * `:error` - same as `{:error, :error}`, for functions such as `Base.decode64/1`
-    * `{:halt, value}` - stores `value` and stops; `exec/1` returns `{:ok, state}`
+    * `{:halt, value}` - stores `value` and stops the pipeline; `exec/1` returns `{:ok, state}`
+    * `{:halt, value, propagate: false}` - like `{:halt, value}`, but when the queue runs as
+      a child (see below) only the child stops
+    * a queue - runs it as a child, see below
 
   Any other return value raises. A step written with `=` stores its value as is.
+
+  ## Child queues
+
+  A function that returns a queue runs it as a child, with its own state starting empty,
+  and the child's result map is stored under the step's name. The child's step names stay
+  separate from the parent's, so a queue built by a function can be reused anywhere:
+
+      queue do
+        user <- Accounts.fetch_user(id)
+        billing <- billing_steps(user)
+        shipping <- shipping_steps(user)
+        confirmation <- confirm(billing.invoice, shipping.tracking)
+      end
+
+  If a child step fails, the parent step fails with the child's error tuple as the reason:
+  `{:error, :billing, {:error, :charge, :declined, %{...}}, %{user: ...}}`. A halt in a
+  child stops the parent too, unless it is `{:halt, value, propagate: false}`; then the
+  parent stores the child's partial results and continues. To store a queue as a value
+  instead of running it, use `=` or return `{:ok, queue}`.
 
   ## Building queues programmatically
 
@@ -42,7 +64,6 @@ defmodule Q do
     * `put/3` stores a value.
     * `run/4` runs a function that can fail, like `<-`.
     * `let/4` runs a function that can't fail, like `=`.
-    * `merge/3` adds steps at run time, chosen from the results so far.
     * `debug/2` prints the state.
 
   Here a step function receives the values of the keys listed in its `params`. Without
@@ -54,22 +75,27 @@ defmodule Q do
   """
 
   alias __MODULE__
-  defstruct operations: [], names: MapSet.new(), merged: false
-  @opaque t :: %__MODULE__{operations: [operation], names: MapSet.t(), merged: boolean}
+  defstruct operations: [], names: MapSet.new()
+  @opaque t :: %__MODULE__{operations: [operation], names: MapSet.t()}
   @type state :: map
   @type name :: any
-  @type result :: {:ok, any} | {:error, any} | :error | {:halt, any}
+  @type result ::
+          {:ok, any}
+          | {:error, any}
+          | :error
+          | {:halt, any}
+          | {:halt, any, [propagate: boolean]}
+          | t
   @type step_fun :: (... -> result)
   @type fun_mfa :: {module, atom, [any]} | {module, atom}
   @type params :: [name] | {[name], [order: :prepend | :append]}
-  @type kind :: :put | :run | :let | :merge | :branch | :debug
+  @type kind :: :put | :run | :let | :branch | :debug
   @type exec_error :: {:error, name, any, state}
   @typep input :: :none | :state | {:keys, [name]}
   @typep call :: {:fun, function, input} | {:mfa, module, atom, [any], input, :prepend | :append}
   @typep operation ::
            {:step, name, :put, any}
            | {:step, name, :run | :let, call}
-           | {:merge, call}
            | {:branch, call}
            | {:debug, Keyword.t()}
 
@@ -119,7 +145,8 @@ defmodule Q do
   @doc """
   Lists the queue's operations in the order they were added, as `{kind, name}` tuples.
 
-  `kind` is the function that added the operation; `name` is `nil` for `merge/3` and `debug/2`.
+  `kind` is the function that added the operation; `name` is `nil` for `debug/2` and for a
+  conditional in a `queue/1` block (`:branch`).
 
   ## Example
       iex> Q.new()
@@ -135,7 +162,6 @@ defmodule Q do
     |> Enum.reverse()
     |> Enum.map(fn
       {:step, name, kind, _} -> {kind, name}
-      {:merge, _call} -> {:merge, nil}
       {:branch, _call} -> {:branch, nil}
       {:debug, _opts} -> {:debug, nil}
     end)
@@ -190,7 +216,7 @@ defmodule Q do
   @spec exec(t) :: {:ok, state} | exec_error
   def exec(%Q{operations: operations}) do
     case run_ops(Enum.reverse(operations), %{}) do
-      {:halted, state} -> {:ok, state}
+      {:halted, state, _propagate} -> {:ok, state}
       result -> result
     end
   end
@@ -202,8 +228,9 @@ defmodule Q do
   The operations can be anonymous functions or functions in a module.
 
   The function should return either `{:ok, value}` if the operation was successful or
-  `{:error, value}` if the operation failed. Functions can also return {:halt, value} to halt
-  execution at any point.
+  `{:error, value}` if the operation failed. Functions can also return `{:halt, value}` to
+  halt execution at any point, or a queue to run it as a child with its results stored under
+  `name`. See the module documentation for the complete contract.
 
   ## Params
 
@@ -244,8 +271,8 @@ defmodule Q do
   @doc """
   Adds a step whose function returns a plain value, for functions that can't fail.
 
-  The value is stored under `name` as is. `fun` and `params` work as in `run/4`. Use `run/4`
-  when the function returns `{:ok, value}` or `{:error, reason}`.
+  The value is stored under `name` as is, including a queue. `fun` and `params` work as in
+  `run/4`. Use `run/4` when the function returns `{:ok, value}` or `{:error, reason}`.
 
   ## Example
       iex> Q.new()
@@ -257,43 +284,6 @@ defmodule Q do
   @spec let(t, name, (... -> any) | fun_mfa, params) :: t
   def let(%Q{} = queue, name, fun, params \\ []) do
     add_op(queue, {:step, name, :let, build_call!(queue, fun, params)})
-  end
-
-  @doc """
-  Adds steps at run time, chosen by a function of the results so far.
-
-  A queue is built before its steps run, so no step can decide which steps come next.
-  In a `queue/1` block, write `if` or `case` around the steps instead; it compiles to
-  `merge/3`. This is the explicit form, and works like `Ecto.Multi.merge/2`.
-
-  When the queue runs, `fun` is called like a `run/4` step function, with `params` working
-  the same way, and must return a queue. That queue runs with its own state, starting empty,
-  so pass values into it with a closure. Its results are then added to the state.
-
-  - If a step of the merged queue fails, `exec/1` returns that step's name and error, with
-    the state of both queues.
-  - If a step of the merged queue halts, the whole pipeline halts.
-  - A merged step whose name already exists in the state raises `ArgumentError`.
-
-  The names a merged queue produces aren't known until it runs, so params of steps added
-  after a merge are not checked when the steps are added. A missing one raises when the
-  queue runs.
-
-  ## Example
-      iex> Q.new()
-      ...> |> Q.put(:amount, 120)
-      ...> |> Q.merge(
-      ...>   fn amount ->
-      ...>     if amount > 100, do: Q.new() |> Q.put(:approval, :required), else: Q.new()
-      ...>   end,
-      ...>   [:amount]
-      ...> )
-      ...> |> Q.exec()
-      {:ok, %{amount: 120, approval: :required}}
-  """
-  @spec merge(t, (... -> t) | fun_mfa, params) :: t
-  def merge(%Q{} = queue, fun, params \\ []) do
-    %{add_op(queue, {:merge, build_call!(queue, fun, params)}) | merged: true}
   end
 
   # Runs the steps of a conditional in a queue/1 block: the branch taken builds a
@@ -314,7 +304,6 @@ defmodule Q do
     * `name <- expr` - a step for functions returning `{:ok, value}`, `{:error, reason}`,
       `:error` or `{:halt, value}` (compiles to `run/4`)
     * `debug()` or `debug(opts)` - prints the state, see `debug/2`
-    * `merge(expr)` - runs the queue `expr` evaluates to, see `merge/3`
     * `if`, `unless`, `case` or `cond` containing steps - the branch taken adds its steps
     * `exec()` - runs the queue, as the last statement only
 
@@ -325,6 +314,8 @@ defmodule Q do
     * The left side is a single variable, and a name is bound once. Names starting with `_`
       run without being stored, and can repeat.
     * A step bound inside a branch is in the result, but can't be used after the conditional.
+    * A `<-` step whose expression returns a queue runs it as a child, and stores the child's
+      results as a map under the step's name. `name <- queue do ... end` nests a block inline.
     * Expressions are evaluated when the queue runs, not when it's built.
 
   Breaking a rule is a compile error. The block returns the queue, unless it ends with
@@ -366,11 +357,9 @@ defmodule Q do
 
   # Resolves a step function and its params into a call, so that mistakes are
   # caught when the step is added rather than when the queue runs.
-  defp build_call!(%Q{names: names, merged: merged}, fun, params) do
+  defp build_call!(%Q{names: names}, fun, params) do
     {keys, order} = normalize_params!(params)
-
-    # Steps added by a merge are only known at run time, see merge/3
-    if not merged, do: check_params_existence(names, keys)
+    check_params_existence(names, keys)
 
     case fun do
       fun when is_function(fun) ->
@@ -481,22 +470,20 @@ defmodule Q do
     {:cont, {:ok, store!(state, name, call(call, state))}}
   end
 
-  defp run_op({kind, call}, {:ok, state}) when kind in [:merge, :branch] do
-    case call(call, state) do
-      %Q{operations: operations} ->
-        case run_ops(Enum.reverse(operations), %{}) do
-          {:ok, merged} ->
-            {:cont, {:ok, merge_state!(state, merged)}}
+  # The branch taken is the enclosing queue's scope: its results are spliced into
+  # the state, and a halt in it stops the enclosing queue.
+  defp run_op({:branch, call}, {:ok, state}) do
+    %Q{operations: operations} = call(call, state)
 
-          {:halted, merged} ->
-            {:halt, {:halted, merge_state!(state, merged)}}
+    case run_ops(Enum.reverse(operations), %{}) do
+      {:ok, branch} ->
+        {:cont, {:ok, merge_state!(state, branch)}}
 
-          {:error, name, reason, merged} ->
-            {:halt, {:error, name, reason, merge_state!(state, merged)}}
-        end
+      {:halted, branch, propagate} ->
+        {:halt, {:halted, merge_state!(state, branch), propagate}}
 
-      other ->
-        raise "expected the #{kind} function to return a Q, got: #{Kernel.inspect(other)}"
+      {:error, name, reason, branch} ->
+        {:halt, {:error, name, reason, merge_state!(state, branch)}}
     end
   end
 
@@ -506,7 +493,10 @@ defmodule Q do
         {:cont, {:ok, store!(state, name, value)}}
 
       {:halt, value} ->
-        {:halt, {:halted, store!(state, name, value)}}
+        {:halt, {:halted, store!(state, name, value), true}}
+
+      {:halt, value, [propagate: propagate]} when is_boolean(propagate) ->
+        {:halt, {:halted, store!(state, name, value), propagate}}
 
       {:error, reason} ->
         {:halt, {:error, name, reason, state}}
@@ -514,8 +504,29 @@ defmodule Q do
       :error ->
         {:halt, {:error, name, :error, state}}
 
+      %Q{operations: operations} ->
+        run_child(name, operations, state)
+
       other ->
-        raise "expected operation `#{Kernel.inspect(name)}` to return {:ok, value}, {:halt, value}, {:error, value} or :error, got: #{Kernel.inspect(other)}"
+        raise "expected operation `#{Kernel.inspect(name)}` to return {:ok, value}, {:halt, value}, {:halt, value, propagate: boolean}, {:error, value}, :error or a queue, got: #{Kernel.inspect(other)}"
+    end
+  end
+
+  # A child queue runs with its own state and its result map is stored under the
+  # step's name. Its halt stops the parent too, unless the halt doesn't propagate.
+  defp run_child(name, operations, state) do
+    case run_ops(Enum.reverse(operations), %{}) do
+      {:ok, child} ->
+        {:cont, {:ok, store!(state, name, child)}}
+
+      {:halted, child, true} ->
+        {:halt, {:halted, store!(state, name, child), true}}
+
+      {:halted, child, false} ->
+        {:cont, {:ok, store!(state, name, child)}}
+
+      {:error, child_name, reason, child} ->
+        {:halt, {:error, name, {:error, child_name, reason, child}, state}}
     end
   end
 
@@ -530,20 +541,10 @@ defmodule Q do
   defp input_args(:none, _state), do: []
   defp input_args(:state, state), do: [state]
 
-  defp input_args({:keys, keys}, state) do
-    Enum.map(keys, fn key ->
-      case Map.fetch(state, key) do
-        {:ok, value} ->
-          value
+  defp input_args({:keys, keys}, state), do: Enum.map(keys, &Map.fetch!(state, &1))
 
-        :error ->
-          raise "the parameter #{Kernel.inspect(key)} is not in the state, " <>
-                  "it was expected from a merged queue"
-      end
-    end)
-  end
-
-  # Names are unique within a queue, so a clash is only possible with a merged queue
+  # Names are unique within a queue and the compiler rejects duplicates across
+  # branches, so a clash here means a branch function was built by hand.
   defp store!(state, name, value) do
     cond do
       unstored?(name) ->
@@ -551,17 +552,17 @@ defmodule Q do
 
       Map.has_key?(state, name) ->
         raise ArgumentError,
-              "step #{Kernel.inspect(name)} conflicts with a merged step of the same name"
+              "step #{Kernel.inspect(name)} conflicts with a step of the same name from a branch"
 
       true ->
         Map.put(state, name, value)
     end
   end
 
-  defp merge_state!(state, merged) do
-    Map.merge(state, merged, fn name, _, _ ->
+  defp merge_state!(state, branch) do
+    Map.merge(state, branch, fn name, _, _ ->
       raise ArgumentError,
-            "merged step #{Kernel.inspect(name)} conflicts with a step of the same name"
+            "step #{Kernel.inspect(name)} from a branch conflicts with a step of the same name"
     end)
   end
 end

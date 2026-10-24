@@ -203,15 +203,48 @@ defmodule Q.DSLTest do
       assert output == "%{a: 1}\n%{b: 2}\n"
     end
 
-    test "merge includes a queue built elsewhere" do
+    test "a step returning a queue runs it as a child" do
       result =
         queue do
           name = "joe"
-          merge(greeting(name))
+          greeting <- greeting(name)
           exec()
         end
 
-      assert {:ok, %{name: "joe", greeting: "hello joe"}} = result
+      assert {:ok, %{name: "joe", greeting: %{greeting: "hello joe"}}} = result
+    end
+
+    test "a queue block nests inline and can use outer steps" do
+      result =
+        queue do
+          name = "joe"
+
+          greeting <-
+            queue do
+              text = "hello " <> name
+              upper = String.upcase(text)
+            end
+
+          exec()
+        end
+
+      assert {:ok, %{name: "joe", greeting: %{text: "hello joe", upper: "HELLO JOE"}}} = result
+    end
+
+    test "a child halt with propagate: false lets the parent continue" do
+      result =
+        queue do
+          cached <-
+            queue do
+              hit <- {:halt, :cached, propagate: false}
+              never = raise("should not run")
+            end
+
+          after_child = :ran
+          exec()
+        end
+
+      assert {:ok, %{cached: %{hit: :cached}, after_child: :ran}} = result
     end
   end
 
@@ -381,6 +414,12 @@ defmodule Q.DSLTest do
 
       assert error.description =~
                "expected a step such as `name = expr` or `name <- expr`, got: :ok"
+    end
+
+    test "merge(queue) is no longer a statement" do
+      error = compile_error("queue do\n  merge(Q.new())\nend")
+      assert error.description =~ "merge(queue) is not a statement"
+      assert error.description =~ "name <- queue"
     end
 
     test "a pattern on the left" do

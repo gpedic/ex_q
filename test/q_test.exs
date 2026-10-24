@@ -44,7 +44,7 @@ defmodule QTest do
         |> Q.run(:bad_return, fn _ -> {:bad, 1} end)
 
       assert_raise RuntimeError,
-                   ~r/^expected operation `:bad_return` to return {:ok, value}, {:halt, value}, {:error, value} or :error, got: {:bad, 1}$/,
+                   ~r/^expected operation `:bad_return` to return {:ok, value}, {:halt, value}, {:halt, value, propagate: boolean}, {:error, value}, :error or a queue, got: {:bad, 1}$/,
                    fn ->
                      Q.exec(q)
                    end
@@ -318,123 +318,178 @@ defmodule QTest do
     end
   end
 
-  describe "merge/3" do
-    defp checkout(total) do
+  describe "child queues" do
+    defp billing(user) do
       Q.new()
-      |> Q.put(:total, total)
-      |> Q.merge(
-        fn total ->
-          if total > 100 do
-            Q.new() |> Q.put(:discount, 10)
-          else
-            Q.new() |> Q.put(:shipping, 5)
-          end
-        end,
-        [:total]
-      )
-      |> Q.run(:done, fn -> {:ok, true} end)
-      |> Q.exec()
+      |> Q.put(:validated, user)
+      |> Q.let(:invoice, fn -> {:invoice, user.id} end)
     end
 
-    test "adds steps chosen from earlier results" do
-      assert {:ok, %{total: 120, discount: 10, done: true}} = checkout(120)
-      assert {:ok, %{total: 50, shipping: 5, done: true}} = checkout(50)
+    defp shipping(user) do
+      Q.new()
+      |> Q.put(:validated, user)
+      |> Q.let(:tracking, fn -> {:tracking, user.id} end)
     end
 
-    test "the merge function can take the whole state or nothing" do
+    test "a step returning a queue runs it and stores its results under the step's name" do
       result =
         Q.new()
-        |> Q.put(:a, 1)
-        |> Q.merge(fn %{a: a} -> Q.new() |> Q.put(:b, a + 1) end)
-        |> Q.merge(fn -> Q.new() |> Q.put(:c, 3) end)
+        |> Q.put(:user, %{id: 7})
+        |> Q.run(:billing, &billing/1, [:user])
+        |> Q.run(:shipping, &shipping/1, [:user])
+        |> Q.let(:confirmation, fn b, s -> {b.invoice, s.tracking} end, [:billing, :shipping])
         |> Q.exec()
 
-      assert {:ok, %{a: 1, b: 2, c: 3}} = result
+      assert result ==
+               {:ok,
+                %{
+                  user: %{id: 7},
+                  billing: %{validated: %{id: 7}, invoice: {:invoice, 7}},
+                  shipping: %{validated: %{id: 7}, tracking: {:tracking, 7}},
+                  confirmation: {{:invoice, 7}, {:tracking, 7}}
+                }}
     end
 
-    test "later steps can use merged results as params" do
+    test "an empty child stores an empty map" do
+      assert Q.new() |> Q.run(:child, fn -> Q.new() end) |> Q.exec() == {:ok, %{child: %{}}}
+    end
+
+    test "{:ok, queue} and let store a queue without running it" do
+      assert {:ok, %{a: a, b: b}} =
+               Q.new()
+               |> Q.run(:a, fn -> {:ok, billing(%{id: 1})} end)
+               |> Q.let(:b, fn -> billing(%{id: 1}) end)
+               |> Q.exec()
+
+      assert [put: :validated, let: :invoice] = Q.to_list(a)
+      assert [put: :validated, let: :invoice] = Q.to_list(b)
+    end
+
+    test "a failing child step fails the parent step with the child's error tuple" do
       result =
         Q.new()
-        |> Q.merge(fn -> Q.new() |> Q.put(:b, 2) end)
-        |> Q.let(:c, &(&1 * 10), [:b])
-        |> Q.exec()
-
-      assert {:ok, %{b: 2, c: 20}} = result
-    end
-
-    test "a missing merged param raises when the queue runs" do
-      q =
-        Q.new()
-        |> Q.merge(fn -> Q.new() end)
-        |> Q.let(:c, &(&1 * 10), [:b])
-
-      assert_raise RuntimeError, ~r/the parameter :b is not in the state/, fn -> Q.exec(q) end
-    end
-
-    test "an error in the merged queue stops the pipeline with both states" do
-      result =
-        Q.new()
-        |> Q.put(:a, 1)
-        |> Q.merge(fn ->
+        |> Q.put(:user, %{id: 7})
+        |> Q.run(:billing, fn ->
           Q.new()
-          |> Q.put(:inner, :ok)
-          |> Q.run(:failing, fn -> {:error, :boom} end)
+          |> Q.put(:validated, true)
+          |> Q.run(:charge, fn -> {:error, :declined} end)
         end)
         |> Q.run(:never, fn -> {:ok, :should_not_run} end)
         |> Q.exec()
 
-      assert {:error, :failing, :boom, %{a: 1, inner: :ok}} = result
+      assert result ==
+               {:error, :billing, {:error, :charge, :declined, %{validated: true}},
+                %{user: %{id: 7}}}
     end
 
-    test "a halt in the merged queue halts the whole pipeline" do
+    test "nested failures nest their error tuples" do
       result =
         Q.new()
-        |> Q.merge(fn -> Q.new() |> Q.run(:stop, fn -> {:halt, :early} end) end)
-        |> Q.run(:never, fn -> {:ok, :should_not_run} end)
-        |> Q.exec()
-
-      assert {:ok, %{stop: :early}} = result
-    end
-
-    test "merged queues can merge" do
-      result =
-        Q.new()
-        |> Q.merge(fn ->
+        |> Q.run(:outer, fn ->
           Q.new()
-          |> Q.put(:outer, 1)
-          |> Q.merge(fn -> Q.new() |> Q.put(:inner, 2) end)
+          |> Q.put(:a, 1)
+          |> Q.run(:middle, fn ->
+            Q.new()
+            |> Q.put(:b, 2)
+            |> Q.run(:inner, fn -> {:error, :deep} end)
+          end)
         end)
         |> Q.exec()
 
-      assert {:ok, %{outer: 1, inner: 2}} = result
+      assert result ==
+               {:error, :outer, {:error, :middle, {:error, :inner, :deep, %{b: 2}}, %{a: 1}}, %{}}
     end
 
-    test "name conflicts with merged steps raise" do
-      assert_raise ArgumentError, ~r/merged step :a conflicts/, fn ->
+    test "a child halt stops the parent too, keeping the partial results at each level" do
+      result =
+        Q.new()
+        |> Q.put(:top, 0)
+        |> Q.run(:outer, fn ->
+          Q.new()
+          |> Q.put(:a, 1)
+          |> Q.run(:middle, fn ->
+            Q.new()
+            |> Q.put(:b, 2)
+            |> Q.run(:stop, fn -> {:halt, :early} end)
+            |> Q.put(:never, :inner)
+          end)
+          |> Q.put(:never, :outer)
+        end)
+        |> Q.put(:never, :top)
+        |> Q.exec()
+
+      assert result == {:ok, %{top: 0, outer: %{a: 1, middle: %{b: 2, stop: :early}}}}
+    end
+
+    test "a halt with propagate: false stops only the child" do
+      result =
+        Q.new()
+        |> Q.run(:cache, fn ->
+          Q.new()
+          |> Q.run(:lookup, fn -> {:halt, :hit, propagate: false} end)
+          |> Q.put(:never, true)
+        end)
+        |> Q.put(:after_cache, true)
+        |> Q.exec()
+
+      assert result == {:ok, %{cache: %{lookup: :hit}, after_cache: true}}
+    end
+
+    test "propagate: true is a plain halt, and both forms are the same at the top level" do
+      child = fn -> Q.new() |> Q.run(:stop, fn -> {:halt, :early, propagate: true} end) end
+
+      assert Q.new() |> Q.run(:child, child) |> Q.put(:never, true) |> Q.exec() ==
+               {:ok, %{child: %{stop: :early}}}
+
+      local = fn -> {:halt, :early, propagate: false} end
+
+      assert Q.new() |> Q.run(:stop, local) |> Q.put(:never, true) |> Q.exec() ==
+               {:ok, %{stop: :early}}
+    end
+
+    test "other third elements of a halt are invalid returns" do
+      for bad <- [{:halt, 1, :bogus}, {:halt, 1, other: true}, {:halt, 1, propagate: :yes}] do
+        assert_raise RuntimeError, ~r/expected operation `:step` to return/, fn ->
+          Q.new() |> Q.run(:step, fn -> bad end) |> Q.exec()
+        end
+      end
+    end
+
+    test "a child under an unstored name runs and is discarded" do
+      result =
+        Q.new()
+        |> Q.run(:_, fn -> Q.new() |> Q.let(:_, fn -> send(self(), :child_ran) end) end)
+        |> Q.exec()
+
+      assert result == {:ok, %{}}
+      assert_received :child_ran
+
+      failing = fn -> Q.new() |> Q.run(:inner, fn -> {:error, :boom} end) end
+
+      assert Q.new() |> Q.run(:_, failing) |> Q.exec() ==
+               {:error, :_, {:error, :inner, :boom, %{}}, %{}}
+    end
+
+    test "is listed as a run step" do
+      assert [run: :billing] = Q.new() |> Q.run(:billing, fn -> Q.new() end) |> Q.to_list()
+    end
+  end
+
+  describe "__branch__/3" do
+    test "a hand-built branch that repeats a step name raises" do
+      assert_raise ArgumentError, ~r/step :a from a branch conflicts/, fn ->
         Q.new()
         |> Q.put(:a, 1)
-        |> Q.merge(fn -> Q.new() |> Q.put(:a, 2) end)
+        |> Q.__branch__(fn -> Q.new() |> Q.put(:a, 2) end, [])
         |> Q.exec()
       end
 
-      assert_raise ArgumentError, ~r/step :b conflicts with a merged step/, fn ->
+      assert_raise ArgumentError, ~r/step :b conflicts with a step of the same name/, fn ->
         Q.new()
-        |> Q.merge(fn -> Q.new() |> Q.put(:b, 1) end)
+        |> Q.__branch__(fn -> Q.new() |> Q.put(:b, 1) end, [])
         |> Q.put(:b, 2)
         |> Q.exec()
       end
-    end
-
-    test "the merge function must return a queue" do
-      assert_raise RuntimeError, ~r/expected the merge function to return a Q, got: :nope/, fn ->
-        Q.new() |> Q.merge(fn -> :nope end) |> Q.exec()
-      end
-    end
-
-    test "is listed by to_list/1" do
-      q = Q.new() |> Q.merge(fn -> Q.new() end)
-      assert [merge: nil] = Q.to_list(q)
-      assert [] = Q.operations(q)
     end
   end
 
@@ -498,7 +553,7 @@ defmodule QTest do
 
     test "returning invalid return value will raise and error" do
       assert_raise RuntimeError,
-                   ~r/^expected operation `:bad_return` to return {:ok, value}, {:halt, value}, {:error, value} or :error, got: {:invalid, 1}$/,
+                   ~r/^expected operation `:bad_return` to return {:ok, value}, {:halt, value}, {:halt, value, propagate: boolean}, {:error, value}, :error or a queue, got: {:invalid, 1}$/,
                    fn ->
                      Q.new()
                      |> Q.run(:bad_return, fn _ -> {:invalid, 1} end)
@@ -506,7 +561,7 @@ defmodule QTest do
                    end
 
       assert_raise RuntimeError,
-                   ~r"expected operation `:empty` to return {:ok, value}, {:halt, value}, {:error, value} or :error, got: nil",
+                   ~r"expected operation `:empty` to return {:ok, value}, {:halt, value}, {:halt, value, propagate: boolean}, {:error, value}, :error or a queue, got: nil",
                    fn ->
                      Q.new()
                      |> Q.run(:empty, fn _ -> nil end)
