@@ -1,21 +1,61 @@
 defmodule Q do
   @moduledoc """
-    Q
+  Build pipelines of named steps, in the spirit of `Ecto.Multi`, and run them with `exec/1`.
 
-    Documentation for `Q`.
+  Every step's result is stored in a state map under the step's name. Later steps
+  receive the whole state, or only the keys they ask for. When a step fails, `exec/1`
+  returns the failing step's name and error together with the state built so far.
+
+  ## Steps
+
+  A step function must return one of:
+
+    * `{:ok, value}` - stores `value` under the step's name and continues
+    * `{:error, reason}` - stops; `exec/1` returns `{:error, name, reason, state}`
+    * `{:halt, value}` - stores `value` and stops; `exec/1` returns `{:ok, state}`
+
+  Any other return value raises.
+
+  ## DSL
+
+  `queue/1` offers the same API without the piping:
+
+      import Q, only: [queue: 1]
+
+      queue do
+        put(:input, "aGVsbG8=")
+        run(:decoded, &Base.decode64/1, [:input])
+        exec()
+      end
+
+  Only the top-level statements of the block are treated as DSL calls (`put/2`,
+  `run/2`, `run/3`, `inspect/0`, `inspect/1` and `exec/0`); calls inside step
+  functions are left alone. Steps can't be added conditionally (inside `if`, `case`
+  and the like) and `exec()` must be the last statement; both raise at compile time.
+  Use the functional API to add steps conditionally.
+
+  A plain `import Q` also imports `Q.inspect/2`, which makes calls to `inspect/1,2`
+  in the importing module ambiguous with `Kernel.inspect/2`. Import only what you
+  need, as above.
   """
 
   alias __MODULE__
   defstruct operations: [], names: MapSet.new()
   @type t :: %__MODULE__{operations: operations, names: names}
   @type state :: map
-  @type fun_arity1 :: (state -> {:ok | :error | :halt, any})
-  @type fun_mfa :: {module, atom, [any]}
-  @typep operation :: {:run, fun} | {:put, any} | {:inspect, Keyword.t()}
+  @type result :: {:ok, any} | {:error, any} | {:halt, any}
+  @type fun_arity1 :: (state -> result)
+  @type step_fun :: (... -> result)
+  @type fun_mfa :: {module, atom, [any]} | {module, atom}
+  @type params :: [name] | {[name], [order: :prepend | :append]}
+  @typep operation ::
+           {:run, {step_fun, params} | {module, atom, [any], params}}
+           | {:put, any}
+           | {:inspect, Keyword.t()}
   @typep operations :: [{name, operation}]
   @typep names :: MapSet.t()
   @type name :: any
-  @type exec_error :: {:error, name, any, list}
+  @type exec_error :: {:error, name, any, state}
 
   @doc """
   Creates and returns a new, empty `Q` struct.
@@ -29,7 +69,7 @@ defmodule Q do
   """
   @spec new :: t
   def new do
-    %Q{}
+    %Q{names: MapSet.new()}
   end
 
   @doc """
@@ -53,7 +93,6 @@ defmodule Q do
       iex> Q.new()
       ...> |> Q.put(:params, %{foo: "bar"})
       ...> |> Q.exec()
-
       {:ok, %{params: %{foo: "bar"}}}
   """
   @spec put(t, name, any) :: t
@@ -79,14 +118,12 @@ defmodule Q do
 
   This function can be used to review the sequence of operations added to the queue.
 
-
   ## Example
       iex> Q.new()
       ...> |> Q.put(:init, "foo")
       ...> |> Q.run(:test, fn text -> {:ok, text} end, [:init])
       ...> |> Q.operations()
-
-      ["test", "init"]
+      [:init, :test]
   """
   @spec operations(Q.t()) :: list
   def operations(%Q{operations: operations}) do
@@ -118,22 +155,17 @@ defmodule Q do
   Each operation is provided with the state of the queue as of the start of the operation.
   If an operation function returns an error, the execution of the queue is halted and an error is returned.
 
-
   ## Example
       iex> Q.new()
       ...> |> Q.run(:write, fn _ -> {:ok, "Hello world!"} end)
       ...> |> Q.exec()
-
       {:ok, %{write: "Hello world!"}}
   """
   @spec exec(t) :: {:ok, term} | exec_error
-  def exec(%Q{} = queue) do
-    Enum.reverse(queue.operations)
-    |> apply_operations(queue.names)
-    |> case do
-      {name, value, acc} -> {:error, name, value, acc}
-      {results, _} -> {:ok, results}
-    end
+  def exec(%Q{operations: operations}) do
+    operations
+    |> Enum.reverse()
+    |> apply_operations()
   end
 
   @doc """
@@ -152,17 +184,25 @@ defmodule Q do
 
   - `queue`: The queue to which the function should be added.
   - `name`: A unique name for this operation. It will be used as a key in the queue's internal state.
-  - `fun`: The function to be run. It can be an anonymous function or a tuple containing a module, function, and arguments.
-  - `params` (optional): A list of keys in the queue's internal state that should be passed to the function as arguments.
+  - `fun`: The function to be run. It can be an anonymous function, a `{module, function}` tuple
+    or a `{module, function, args}` tuple.
+  - `params` (optional): A list of keys in the queue's internal state that should be passed to the
+    function as arguments, or a `{keys, opts}` tuple.
 
+  ## Options
+
+  - `:order` - for `{module, function, args}` steps, whether the values of `keys` go before
+    (`:prepend`, the default) or after (`:append`) `args`. Ignored for anonymous functions.
+
+  ## Example
+      iex> Q.new()
+      ...> |> Q.put(:key, :b)
+      ...> |> Q.run(:value, {Map, :fetch, [%{a: 1, b: 2}]}, {[:key], order: :append})
+      ...> |> Q.exec()
+      {:ok, %{key: :b, value: 2}}
   """
-  @spec run(t, name, fun_arity1 | fun_mfa, [atom]) :: t
+  @spec run(t, name, step_fun | fun_mfa, params) :: t
   def run(queue, name, fun, params \\ [])
-
-  def run(queue, name, {mod, fun, args}, {params, opts})
-      when is_atom(mod) and is_atom(fun) and is_list(args) and is_list(params) and is_list(opts) do
-    add_operation(queue, name, {:run, {mod, fun, args, {params, opts}}}, params)
-  end
 
   def run(queue, name, {mod, fun, args}, params)
       when is_atom(mod) and is_atom(fun) and is_list(args) do
@@ -195,9 +235,10 @@ defmodule Q do
   - `mod`: The module where the function is defined.
   - `fun`: The function to be executed.
   - `args`: Arguments that should be passed to the function.
-  - `params` (optional): A list of keys in the queue's internal state that should be passed to the function as arguments.
+  - `params` (optional): A list of keys in the queue's internal state that should be passed to the
+    function as arguments, or a `{keys, opts}` tuple. See `run/4` for the options.
   """
-  @spec run(t, name, module, function :: atom, args :: [any], [atom]) :: t
+  @spec run(t, name, module, function :: atom, args :: [any], params) :: t
   def run(queue, name, mod, fun, args, params \\ [])
       when is_atom(mod) and is_atom(fun) and is_list(args) do
     add_operation(queue, name, {:run, {mod, fun, args, params}}, params)
@@ -205,6 +246,8 @@ defmodule Q do
 
   @doc """
   Provides a DSL for creating a queue using a more declarative syntax.
+
+  Only top-level statements are DSL calls; see the module documentation for the limitations.
 
   ## Example
       queue do
@@ -214,11 +257,15 @@ defmodule Q do
       end
   """
   defmacro queue(do: block) do
+    statements = dsl_statements(block)
+    validate_dsl!(statements)
+    body = Enum.map(statements, &transform_dsl/1)
+
     quote do
       (fn ->
-         var!(queue) = Q.new()
-         unquote(Macro.prewalk(block, &Q.transform_dsl/1))
-         var!(queue)
+         queue = Q.new()
+         unquote_splicing(body)
+         queue
        end).()
     end
   end
@@ -226,61 +273,142 @@ defmodule Q do
   @doc false
   def transform_dsl({:exec, _meta, []}) do
     quote do
-      var!(queue) = Q.exec(var!(queue))
+      queue = Q.exec(queue)
     end
   end
 
   def transform_dsl({:put, _meta, [name, value]}) do
     quote do
-      var!(queue) = Q.put(var!(queue), unquote(name), unquote(value))
+      queue = Q.put(queue, unquote(name), unquote(value))
     end
   end
 
   def transform_dsl({:run, _meta, [name, fun, params]}) do
     quote do
-      var!(queue) = Q.run(var!(queue), unquote(name), unquote(fun), unquote(params))
+      queue = Q.run(queue, unquote(name), unquote(fun), unquote(params))
     end
   end
 
   def transform_dsl({:run, _meta, [name, fun]}) do
     quote do
-      var!(queue) = Q.run(var!(queue), unquote(name), unquote(fun), [])
+      queue = Q.run(queue, unquote(name), unquote(fun), [])
     end
   end
 
   def transform_dsl({:inspect, _meta, []}) do
     quote do
-      var!(queue) = Q.inspect(var!(queue))
+      queue = Q.inspect(queue)
     end
   end
 
   def transform_dsl({:inspect, _meta, [opts]}) do
     quote do
-      var!(queue) = Q.inspect(var!(queue), unquote(opts))
+      queue = Q.inspect(queue, unquote(opts))
     end
   end
 
   def transform_dsl(other), do: other
 
+  defp dsl_statements({:__block__, _meta, statements}), do: statements
+  defp dsl_statements(nil), do: []
+  defp dsl_statements(statement), do: [statement]
+
+  defp validate_dsl!(statements) do
+    last_index = length(statements) - 1
+
+    statements
+    |> Enum.with_index()
+    |> Enum.each(fn {statement, index} ->
+      if match?({:exec, _, []}, statement) and index != last_index do
+        raise ArgumentError, "exec() must be the last statement in queue/1"
+      end
+
+      reject_nested_dsl!(statement)
+    end)
+  end
+
+  # Steps can only be added by top-level statements. A DSL call nested in another
+  # expression (`if`, `case`, an assignment, ...) would not add its step to the
+  # queue, so it is rejected. Function bodies are skipped: calls in there belong
+  # to the step, not the DSL. `inspect/1` is not checked as it is usually
+  # `Kernel.inspect/1`.
+  defp reject_nested_dsl!({_name, _meta, args} = statement) when is_list(args) do
+    if dsl_call?(statement) do
+      Enum.each(args, &find_nested_dsl!/1)
+    else
+      find_nested_dsl!(statement)
+    end
+  end
+
+  defp reject_nested_dsl!(statement), do: find_nested_dsl!(statement)
+
+  defp find_nested_dsl!(ast) do
+    Macro.prewalk(ast, fn
+      {:fn, _, _} ->
+        nil
+
+      {:inspect, _, [_]} = node ->
+        node
+
+      {name, _, args} = node when is_atom(name) and is_list(args) ->
+        if dsl_call?(node) do
+          raise ArgumentError,
+                "#{name}/#{length(args)} must be a top-level statement in queue/1, " <>
+                  "steps can't be added inside other expressions such as `if` or `case`; " <>
+                  "use the functional API to add steps conditionally"
+        end
+
+        node
+
+      node ->
+        node
+    end)
+  end
+
+  defp dsl_call?({:exec, _, []}), do: true
+  defp dsl_call?({:put, _, [_, _]}), do: true
+  defp dsl_call?({:run, _, [_, _]}), do: true
+  defp dsl_call?({:run, _, [_, _, _]}), do: true
+  defp dsl_call?({:inspect, _, []}), do: true
+  defp dsl_call?({:inspect, _, [_]}), do: true
+  defp dsl_call?(_), do: false
+
   defp add_operation(%Q{} = queue, name, operation, params) do
     %{operations: operations, names: names} = queue
-    check_params_existence(names, params)
+    check_params_existence(names, param_names(params))
 
     if MapSet.member?(names, name) do
-      raise "#{Kernel.inspect(name)} is already a member of the Q: \n#{Kernel.inspect(queue)}"
+      raise "#{Kernel.inspect(name)} is already a member of the Q"
     else
       %{queue | operations: [{name, operation} | operations], names: MapSet.put(names, name)}
     end
   end
 
-  defp apply_operations([], _names), do: {nil, []}
+  defp param_names(params) when is_list(params), do: params
 
-  defp apply_operations(operations, names) do
-    operations
-    |> Enum.reduce_while({%{}, names}, &apply_operation(&1, &2))
+  defp param_names({params, opts}) when is_list(params) and is_list(opts) do
+    case Keyword.get(opts, :order, :prepend) do
+      order when order in [:prepend, :append] ->
+        params
+
+      order ->
+        raise ArgumentError,
+              "expected the :order option to be :prepend or :append, got: #{Kernel.inspect(order)}"
+    end
   end
 
-  defp apply_operation({:inspect, {:inspect, opts}}, {acc, names}) do
+  defp param_names(params) do
+    raise ArgumentError,
+          "expected params to be a list of names or a {names, opts} tuple, got: #{Kernel.inspect(params)}"
+  end
+
+  defp apply_operations([]), do: {:ok, nil}
+
+  defp apply_operations(operations) do
+    Enum.reduce_while(operations, {:ok, %{}}, &apply_operation/2)
+  end
+
+  defp apply_operation({:inspect, {:inspect, opts}}, {:ok, acc}) do
     if opts[:only] do
       # credo:disable-for-next-line Credo.Check.Warning.IoInspect
       acc |> Map.take(List.wrap(opts[:only])) |> IO.inspect(opts)
@@ -289,29 +417,29 @@ defmodule Q do
       IO.inspect(acc, opts)
     end
 
-    {:cont, {acc, names}}
+    {:cont, {:ok, acc}}
   end
 
-  defp apply_operation({name, operation}, {acc, names}) do
-    with {:ok, value} <- apply_operation(operation, acc),
-         acc <- Map.put(acc, name, value) do
-      {:cont, {acc, names}}
-    else
+  defp apply_operation({name, operation}, {:ok, acc}) do
+    case run_operation(operation, acc) do
+      {:ok, value} ->
+        {:cont, {:ok, Map.put(acc, name, value)}}
+
       {:halt, value} ->
-        {:halt, {Map.put(acc, name, value), names}}
+        {:halt, {:ok, Map.put(acc, name, value)}}
 
       {:error, value} ->
-        {:halt, {name, value, acc}}
+        {:halt, {:error, name, value, acc}}
 
       other ->
         raise "expected operation `#{Kernel.inspect(name)}` to return {:ok, value}, {:halt, value} or {:error, value}, got: #{Kernel.inspect(other)}"
     end
   end
 
-  defp apply_operation({:run, run}, acc),
+  defp run_operation({:run, run}, acc),
     do: apply_run_fun(run, acc)
 
-  defp apply_operation({:put, value}, _acc),
+  defp run_operation({:put, value}, _acc),
     do: {:ok, value}
 
   defp apply_run_fun({mod, fun, args, {params, opts}}, acc)
@@ -329,6 +457,10 @@ defmodule Q do
 
   defp apply_run_fun({mod, fun, args, params}, acc) when is_list(params) do
     apply_run_fun({mod, fun, args, {params, []}}, acc)
+  end
+
+  defp apply_run_fun({fun, {params, _opts}}, acc) when is_function(fun) do
+    apply_run_fun({fun, params}, acc)
   end
 
   defp apply_run_fun({fun, params}, acc) when is_function(fun) do

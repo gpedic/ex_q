@@ -28,13 +28,35 @@ defmodule QTest do
     end
   end
 
+  defmodule DSLScoping do
+    import Q, only: [queue: 1]
+
+    defp put(key, value), do: {key, value}
+
+    def nested_calls do
+      queue do
+        put(:n, 42)
+        run(:label, fn n -> {:ok, inspect(n)} end, [:n])
+        run(:pair, fn n -> {:ok, put(:n, n)} end, [:n])
+        exec()
+      end
+    end
+
+    def caller_variable(queue) do
+      queue do
+        put(:queue_name, queue)
+        exec()
+      end
+    end
+  end
+
   describe "new/0" do
     test "creating the basic struct" do
       assert %Q{names: _, operations: []} = Q.new()
     end
   end
 
-  describe "exec/0" do
+  describe "exec/1" do
     test "executing without queued tasks returns nil" do
       assert {:ok, nil} = Q.new() |> Q.exec()
     end
@@ -52,7 +74,7 @@ defmodule QTest do
     end
   end
 
-  describe "put/2" do
+  describe "put/3" do
     test "put operations" do
       q =
         Q.new()
@@ -68,6 +90,15 @@ defmodule QTest do
         Q.new() |> Q.put(:test, :test) |> Q.put(:test, :fails)
       end
     end
+
+    test "the duplicate name error does not leak stored values" do
+      error =
+        assert_raise RuntimeError, fn ->
+          Q.new() |> Q.put(:password, "hunter2") |> Q.put(:password, "x")
+        end
+
+      refute error.message =~ "hunter2"
+    end
   end
 
   describe "run/6" do
@@ -80,6 +111,16 @@ defmodule QTest do
         |> Q.exec()
 
       assert {:ok, %{init: :test, read: "hello world", write: "HELLO WORLD"}} = result
+    end
+
+    test "supports {params, opts}" do
+      result =
+        Q.new()
+        |> Q.put(:key, :b)
+        |> Q.run(:value, Map, :fetch, [%{a: 1, b: 2}], {[:key], order: :append})
+        |> Q.exec()
+
+      assert {:ok, %{key: :b, value: 2}} = result
     end
   end
 
@@ -140,6 +181,32 @@ defmodule QTest do
         |> Q.run(:read, fn _ -> {:ok, "hello world"} end)
         |> Q.run(:write, fn _ -> {:error, :invalid_params} end, [:foo])
         |> Q.exec()
+      end
+    end
+
+    test "anonymous functions accept {params, opts}" do
+      result =
+        Q.new()
+        |> Q.put(:a, 1)
+        |> Q.run(:b, fn a -> {:ok, a * 2} end, {[:a], order: :append})
+        |> Q.exec()
+
+      assert {:ok, %{a: 1, b: 2}} = result
+    end
+
+    test "params that are not a list or {list, opts} raise" do
+      assert_raise ArgumentError, ~r/expected params to be a list of names/, fn ->
+        Q.new()
+        |> Q.put(:a, 1)
+        |> Q.run(:b, {Map, :fetch, []}, :a)
+      end
+    end
+
+    test "an invalid :order raises when the step is added" do
+      assert_raise ArgumentError, ~r/expected the :order option to be :prepend or :append/, fn ->
+        Q.new()
+        |> Q.put(:a, 1)
+        |> Q.run(:b, {Map, :fetch, []}, {[:a], order: :sideways})
       end
     end
   end
@@ -352,11 +419,60 @@ defmodule QTest do
       assert {:ok,
               %{
                 text: "!",
-                # mfa args first (default)
+                # mfa args first
                 appended: "world!",
-                # q params first
+                # q params first (default)
                 prepended: "!world"
               }} = result
+    end
+
+    test "only top-level statements are rewritten" do
+      assert {:ok, %{n: 42, label: "42", pair: {:n, 42}}} = DSLScoping.nested_calls()
+    end
+
+    test "a caller variable named queue is not shadowed" do
+      assert {:ok, %{queue_name: "emails"}} = DSLScoping.caller_variable("emails")
+    end
+
+    test "top-level expressions without DSL calls still run" do
+      parent = self()
+      notify? = Application.get_env(:ex_q, :notify_test, true)
+
+      result =
+        queue do
+          put(:a, 1)
+          if notify?, do: send(parent, :ran)
+          exec()
+        end
+
+      assert {:ok, %{a: 1}} = result
+      assert_received :ran
+    end
+
+    test "DSL calls nested in other expressions raise at compile time" do
+      assert_raise ArgumentError, ~r"put/2 must be a top-level statement", fn ->
+        Code.eval_string("""
+        import Q, only: [queue: 1]
+
+        queue do
+          put(:a, 1)
+          if true, do: put(:b, 2)
+        end
+        """)
+      end
+    end
+
+    test "exec() must be the last statement" do
+      assert_raise ArgumentError, ~r"exec\(\) must be the last statement", fn ->
+        Code.eval_string("""
+        import Q, only: [queue: 1]
+
+        queue do
+          exec()
+          put(:a, 1)
+        end
+        """)
+      end
     end
   end
 end
