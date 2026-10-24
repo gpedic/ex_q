@@ -38,21 +38,18 @@ defmodule Q do
 
   alias __MODULE__
   defstruct operations: [], names: MapSet.new()
-  @type t :: %__MODULE__{operations: operations, names: names}
+  @opaque t :: %__MODULE__{operations: [operation], names: MapSet.t()}
   @type state :: map
+  @type name :: any
   @type result :: {:ok, any} | {:error, any} | :error | {:halt, any}
-  @type fun_arity1 :: (state -> result)
   @type step_fun :: (... -> result)
   @type fun_mfa :: {module, atom, [any]} | {module, atom}
   @type params :: [name] | {[name], [order: :prepend | :append]}
-  @typep operation ::
-           {:run, {step_fun, params} | {module, atom, [any], params}}
-           | {:put, any}
-           | {:debug, Keyword.t()}
-  @typep operations :: [{name, operation}]
-  @typep names :: MapSet.t()
-  @type name :: any
+  @type kind :: :put | :run | :debug
   @type exec_error :: {:error, name, any, state}
+  @typep input :: :none | :state | {:keys, [name]}
+  @typep call :: {:fun, function, input} | {:mfa, module, atom, [any], input, :prepend | :append}
+  @typep operation :: {:step, name, :put, any} | {:step, name, :run, call} | {:debug, Keyword.t()}
 
   @doc """
   Creates and returns a new, empty `Q` struct.
@@ -93,21 +90,31 @@ defmodule Q do
       {:ok, %{params: %{foo: "bar"}}}
   """
   @spec put(t, name, any) :: t
-  def put(queue, name, value) do
-    add_operation(queue, name, {:put, value}, [])
+  def put(%Q{} = queue, name, value) do
+    add_op(queue, {:step, name, :put, value})
   end
 
   @doc """
-  Converts the operations queue to a list, in the order they were added.
+  Lists the queue's operations in the order they were added, as `{kind, name}` tuples.
 
-  This function is useful for inspecting the current state of the queue.
-  Direct inspection of the queue's internal state is discouraged to maintain
-  encapsulation.
+  `kind` is the function that added the operation; `name` is `nil` for `debug/2`.
+
+  ## Example
+      iex> Q.new()
+      ...> |> Q.put(:a, 1)
+      ...> |> Q.debug()
+      ...> |> Q.run(:b, fn _ -> {:ok, 2} end)
+      ...> |> Q.to_list()
+      [{:put, :a}, {:debug, nil}, {:run, :b}]
   """
-  @spec to_list(t) :: [{name, term}]
+  @spec to_list(t) :: [{kind, name | nil}]
   def to_list(%Q{operations: operations}) do
     operations
     |> Enum.reverse()
+    |> Enum.map(fn
+      {:step, name, kind, _} -> {kind, name}
+      {:debug, _opts} -> {:debug, nil}
+    end)
   end
 
   @doc """
@@ -122,12 +129,9 @@ defmodule Q do
       ...> |> Q.operations()
       [:init, :test]
   """
-  @spec operations(Q.t()) :: list
+  @spec operations(t) :: [name]
   def operations(%Q{operations: operations}) do
-    operations
-    |> Enum.reject(&match?({:debug, {:debug, _}}, &1))
-    |> Enum.map(fn {op_name, _} -> op_name end)
-    |> Enum.reverse()
+    for {:step, name, _kind, _} <- Enum.reverse(operations), do: name
   end
 
   @doc """
@@ -143,8 +147,8 @@ defmodule Q do
 
   """
   @spec debug(t, Keyword.t()) :: t
-  def debug(queue, opts \\ []) do
-    Map.update!(queue, :operations, &[{:debug, {:debug, opts}} | &1])
+  def debug(%Q{} = queue, opts \\ []) do
+    add_op(queue, {:debug, opts})
   end
 
   @doc """
@@ -159,11 +163,12 @@ defmodule Q do
       ...> |> Q.exec()
       {:ok, %{write: "Hello world!"}}
   """
-  @spec exec(t) :: {:ok, term} | exec_error
+  @spec exec(t) :: {:ok, state} | exec_error
   def exec(%Q{operations: operations}) do
-    operations
-    |> Enum.reverse()
-    |> apply_operations()
+    case run_ops(Enum.reverse(operations), %{}) do
+      {:halted, state} -> {:ok, state}
+      result -> result
+    end
   end
 
   @doc """
@@ -173,10 +178,8 @@ defmodule Q do
   The operations can be anonymous functions or functions in a module.
 
   The function should return either `{:ok, value}` if the operation was successful or
-  `{:error, value}` if the operation failed. The state of the queue is passed
-  as arguments to the function if no params are specified.
-
-  Functions can also return {:halt, value} to halt execution at any point.
+  `{:error, value}` if the operation failed. Functions can also return {:halt, value} to halt
+  execution at any point.
 
   ## Params
 
@@ -186,6 +189,16 @@ defmodule Q do
     or a `{module, function, args}` tuple.
   - `params` (optional): A list of keys in the queue's internal state that should be passed to the
     function as arguments, or a `{keys, opts}` tuple.
+
+  ## Function input
+
+  - With `params`, the function receives the values of those keys, in order.
+  - Without `params`, it receives the whole state, or no arguments if it is an anonymous function
+    of arity 0.
+  - `{module, function, args}` functions receive `args` as well; see the `:order` option.
+
+  The function's arity is checked when the step is added, and `ArgumentError` is raised if it
+  doesn't match, or if a module function doesn't exist.
 
   ## Options
 
@@ -200,46 +213,8 @@ defmodule Q do
       {:ok, %{key: :b, value: 2}}
   """
   @spec run(t, name, step_fun | fun_mfa, params) :: t
-  def run(queue, name, fun, params \\ [])
-
-  def run(queue, name, {mod, fun, args}, params)
-      when is_atom(mod) and is_atom(fun) and is_list(args) do
-    add_operation(queue, name, {:run, {mod, fun, args, params}}, params)
-  end
-
-  def run(queue, name, {mod, fun}, params)
-      when is_atom(mod) and is_atom(fun) do
-    run(queue, name, {mod, fun, []}, params)
-  end
-
-  def run(queue, name, fun, params) when is_function(fun) do
-    add_operation(queue, name, {:run, {fun, params}}, params)
-  end
-
-  @doc """
-  Adds a function to be executed as part of the queue.
-  Similar to `run/4`, but allows to pass module name, function and arguments.
-
-  The function should return either `{:ok, value}` if the operation was successful or
-  `{:error, value}` if the operation failed. The state of the queue is passed
-  as arguments to the function if no params are specified.
-
-  Functions can also return {:halt, value} to halt execution at any point.
-
-  ## Params
-
-  - `queue`: The queue to which the function should be added.
-  - `name`: A unique name for this operation. It will be used as a key in the queue's internal state.
-  - `mod`: The module where the function is defined.
-  - `fun`: The function to be executed.
-  - `args`: Arguments that should be passed to the function.
-  - `params` (optional): A list of keys in the queue's internal state that should be passed to the
-    function as arguments, or a `{keys, opts}` tuple. See `run/4` for the options.
-  """
-  @spec run(t, name, module, function :: atom, args :: [any], params) :: t
-  def run(queue, name, mod, fun, args, params \\ [])
-      when is_atom(mod) and is_atom(fun) and is_list(args) do
-    add_operation(queue, name, {:run, {mod, fun, args, params}}, params)
+  def run(%Q{} = queue, name, fun, params \\ []) do
+    add_op(queue, {:step, name, :run, build_call!(queue, fun, params)})
   end
 
   @doc """
@@ -368,20 +343,41 @@ defmodule Q do
   defp dsl_call?({:debug, _, [_]}), do: true
   defp dsl_call?(_), do: false
 
-  defp add_operation(%Q{} = queue, name, operation, params) do
-    %{operations: operations, names: names} = queue
-    check_params_existence(names, param_names(params))
-
-    if MapSet.member?(names, name) do
+  defp add_op(%Q{} = queue, {:step, name, _kind, _} = op) do
+    if MapSet.member?(queue.names, name) do
       raise ArgumentError, "#{Kernel.inspect(name)} is already a member of the Q"
-    else
-      %{queue | operations: [{name, operation} | operations], names: MapSet.put(names, name)}
+    end
+
+    %{queue | operations: [op | queue.operations], names: MapSet.put(queue.names, name)}
+  end
+
+  defp add_op(%Q{} = queue, op), do: %{queue | operations: [op | queue.operations]}
+
+  # Resolves a step function and its params into a call, so that mistakes are
+  # caught when the step is added rather than when the queue runs.
+  defp build_call!(%Q{names: names}, fun, params) do
+    {keys, order} = normalize_params!(params)
+    check_params_existence(names, keys)
+
+    case fun do
+      fun when is_function(fun) ->
+        {:fun, fun, fun_input!(fun, keys)}
+
+      {mod, fun} when is_atom(mod) and is_atom(fun) ->
+        mfa_call!(mod, fun, [], keys, order)
+
+      {mod, fun, args} when is_atom(mod) and is_atom(fun) and is_list(args) ->
+        mfa_call!(mod, fun, args, keys, order)
+
+      other ->
+        raise ArgumentError,
+              "expected a function, {module, function} or {module, function, args}, got: #{Kernel.inspect(other)}"
     end
   end
 
-  defp param_names(params) when is_list(params), do: params
+  defp normalize_params!(keys) when is_list(keys), do: {keys, :prepend}
 
-  defp param_names({params, opts}) when is_list(params) and is_list(opts) do
+  defp normalize_params!({keys, opts}) when is_list(keys) and is_list(opts) do
     case Keyword.keys(opts) -- [:order] do
       [] ->
         :ok
@@ -393,7 +389,7 @@ defmodule Q do
 
     case Keyword.get(opts, :order, :prepend) do
       order when order in [:prepend, :append] ->
-        params
+        {keys, order}
 
       order ->
         raise ArgumentError,
@@ -401,93 +397,101 @@ defmodule Q do
     end
   end
 
-  defp param_names(params) do
+  defp normalize_params!(params) do
     raise ArgumentError,
           "expected params to be a list of names or a {names, opts} tuple, got: #{Kernel.inspect(params)}"
   end
 
-  defp apply_operations(operations) do
-    Enum.reduce_while(operations, {:ok, %{}}, &apply_operation/2)
+  defp fun_input!(fun, keys) do
+    {:arity, arity} = Function.info(fun, :arity)
+
+    case {keys, arity} do
+      {[], 0} ->
+        :none
+
+      {[], 1} ->
+        :state
+
+      {[], _} ->
+        raise ArgumentError,
+              "expected a function of arity 0, or 1 to receive the state, got a function of arity #{arity}"
+
+      {keys, arity} when length(keys) == arity ->
+        {:keys, keys}
+
+      {keys, _} ->
+        raise ArgumentError,
+              "expected a function of arity #{length(keys)} for params #{Kernel.inspect(keys)}, " <>
+                "got a function of arity #{arity}"
+    end
   end
 
-  defp apply_operation({:debug, {:debug, opts}}, {:ok, acc}) do
-    if opts[:only] do
-      # credo:disable-for-next-line Credo.Check.Warning.IoInspect
-      acc |> Map.take(List.wrap(opts[:only])) |> IO.inspect(opts)
-    else
-      # credo:disable-for-next-line Credo.Check.Warning.IoInspect
-      IO.inspect(acc, opts)
+  defp mfa_call!(mod, fun, args, keys, order) do
+    {input, input_arity} = if keys == [], do: {:state, 1}, else: {{:keys, keys}, length(keys)}
+    arity = input_arity + length(args)
+    Code.ensure_loaded(mod)
+
+    if not function_exported?(mod, fun, arity) do
+      raise ArgumentError, "#{Exception.format_mfa(mod, fun, arity)} is undefined or private"
     end
 
-    {:cont, {:ok, acc}}
+    {:mfa, mod, fun, args, input, order}
   end
 
-  defp apply_operation({name, operation}, {:ok, acc}) do
-    case run_operation(operation, acc) do
+  defp check_params_existence(names, keys) do
+    for key <- keys, not MapSet.member?(names, key) do
+      raise ArgumentError, "The parameter #{Kernel.inspect(key)} does not exist in the queue."
+    end
+
+    :ok
+  end
+
+  defp run_ops(ops, state), do: Enum.reduce_while(ops, {:ok, state}, &run_op/2)
+
+  defp run_op({:debug, opts}, {:ok, state}) do
+    if opts[:only] do
+      # credo:disable-for-next-line Credo.Check.Warning.IoInspect
+      state |> Map.take(List.wrap(opts[:only])) |> IO.inspect(opts)
+    else
+      # credo:disable-for-next-line Credo.Check.Warning.IoInspect
+      IO.inspect(state, opts)
+    end
+
+    {:cont, {:ok, state}}
+  end
+
+  defp run_op({:step, name, :put, value}, {:ok, state}) do
+    {:cont, {:ok, Map.put(state, name, value)}}
+  end
+
+  defp run_op({:step, name, :run, call}, {:ok, state}) do
+    case call(call, state) do
       {:ok, value} ->
-        {:cont, {:ok, Map.put(acc, name, value)}}
+        {:cont, {:ok, Map.put(state, name, value)}}
 
       {:halt, value} ->
-        {:halt, {:ok, Map.put(acc, name, value)}}
+        {:halt, {:halted, Map.put(state, name, value)}}
 
-      {:error, value} ->
-        {:halt, {:error, name, value, acc}}
+      {:error, reason} ->
+        {:halt, {:error, name, reason, state}}
 
       :error ->
-        {:halt, {:error, name, :error, acc}}
+        {:halt, {:error, name, :error, state}}
 
       other ->
         raise "expected operation `#{Kernel.inspect(name)}` to return {:ok, value}, {:halt, value}, {:error, value} or :error, got: #{Kernel.inspect(other)}"
     end
   end
 
-  defp run_operation({:run, run}, acc),
-    do: apply_run_fun(run, acc)
+  defp call({:fun, fun, input}, state), do: apply(fun, input_args(input, state))
 
-  defp run_operation({:put, value}, _acc),
-    do: {:ok, value}
+  defp call({:mfa, mod, fun, args, input, :prepend}, state),
+    do: apply(mod, fun, input_args(input, state) ++ args)
 
-  defp apply_run_fun({mod, fun, args, {params, opts}}, acc)
-       when is_list(opts) and is_list(params) do
-    param_args = build_args(acc, params, [])
+  defp call({:mfa, mod, fun, args, input, :append}, state),
+    do: apply(mod, fun, args ++ input_args(input, state))
 
-    final_args =
-      case Keyword.get(opts, :order, :prepend) do
-        :prepend -> param_args ++ args
-        :append -> args ++ param_args
-      end
-
-    apply(mod, fun, final_args)
-  end
-
-  defp apply_run_fun({mod, fun, args, params}, acc) when is_list(params) do
-    apply_run_fun({mod, fun, args, {params, []}}, acc)
-  end
-
-  defp apply_run_fun({fun, {params, _opts}}, acc) when is_function(fun) do
-    apply_run_fun({fun, params}, acc)
-  end
-
-  defp apply_run_fun({fun, params}, acc) when is_function(fun) do
-    apply(fun, build_args(acc, params, []))
-  end
-
-  defp build_args(acc, params, rest_args) do
-    case params do
-      [] -> [acc | rest_args]
-      _ -> Enum.map(params, fn key -> Map.get(acc, key) end) ++ rest_args
-    end
-  end
-
-  defp check_params_existence(_names, []), do: :ok
-
-  defp check_params_existence(names, params) do
-    for param <- params do
-      unless MapSet.member?(names, param) do
-        raise ArgumentError, "The parameter #{Kernel.inspect(param)} does not exist in the queue."
-      end
-    end
-
-    :ok
-  end
+  defp input_args(:none, _state), do: []
+  defp input_args(:state, state), do: [state]
+  defp input_args({:keys, keys}, state), do: Enum.map(keys, &Map.fetch!(state, &1))
 end

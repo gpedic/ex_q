@@ -92,8 +92,7 @@ defmodule QTest do
         Q.new()
         |> Q.put(:init, :test)
 
-      assert %Q{names: set, operations: [{:init, {:put, :test}}]} = q
-      assert MapSet.equal?(MapSet.new([:init]), set)
+      assert [{:put, :init}] = Q.to_list(q)
       assert {:ok, %{init: :test}} = Q.exec(q)
     end
 
@@ -113,30 +112,45 @@ defmodule QTest do
     end
   end
 
-  describe "run/6" do
-    test "basic functionality" do
+  describe "run/4" do
+    test "an MFA without params receives the whole state" do
       result =
         Q.new()
         |> Q.put(:init, :test)
         |> Q.run(:read, fn _ -> {:ok, "hello world"} end)
-        |> Q.run(:write, TestWriter, :write, [[upcase: true]])
+        |> Q.run(:write, {TestWriter, :write, [[upcase: true]]})
         |> Q.exec()
 
       assert {:ok, %{init: :test, read: "hello world", write: "HELLO WORLD"}} = result
     end
 
-    test "supports {params, opts}" do
-      result =
-        Q.new()
-        |> Q.put(:key, :b)
-        |> Q.run(:value, Map, :fetch, [%{a: 1, b: 2}], {[:key], order: :append})
-        |> Q.exec()
-
-      assert {:ok, %{key: :b, value: 2}} = result
+    test "an arity-0 function without params is called with no arguments" do
+      assert {:ok, %{answer: 42}} =
+               Q.new()
+               |> Q.run(:answer, fn -> {:ok, 42} end)
+               |> Q.exec()
     end
-  end
 
-  describe "run/4" do
+    test "a function whose arity doesn't match its params raises when added" do
+      assert_raise ArgumentError, ~r/expected a function of arity 1 for params \[:a\]/, fn ->
+        Q.new() |> Q.put(:a, 1) |> Q.run(:b, fn -> {:ok, 2} end, [:a])
+      end
+
+      assert_raise ArgumentError, ~r/expected a function of arity 0, or 1/, fn ->
+        Q.new() |> Q.run(:b, fn _, _ -> {:ok, 2} end)
+      end
+    end
+
+    test "an MFA that doesn't exist raises when added" do
+      assert_raise ArgumentError, ~r/String.nope\/1 is undefined or private/, fn ->
+        Q.new() |> Q.put(:a, "x") |> Q.run(:b, {String, :nope}, [:a])
+      end
+
+      assert_raise ArgumentError, ~r/Kernel.<>\/2 is undefined or private/, fn ->
+        Q.new() |> Q.put(:a, "x") |> Q.run(:b, {Kernel, :<>, ["y"]}, [:a])
+      end
+    end
+
     test "basic functionality" do
       result =
         Q.new()
@@ -207,10 +221,12 @@ defmodule QTest do
     end
 
     test "params that are not a list or {list, opts} raise" do
+      q = Q.new() |> Q.put(:a, 1)
+
+      # apply/3 keeps the type checker from flagging the deliberately invalid params
       assert_raise ArgumentError, ~r/expected params to be a list of names/, fn ->
-        Q.new()
-        |> Q.put(:a, 1)
-        |> Q.run(:b, {Map, :fetch, []}, :a)
+        # credo:disable-for-next-line Credo.Check.Refactor.Apply
+        apply(Q, :run, [q, :b, {Map, :fetch, []}, :a])
       end
     end
 
@@ -283,11 +299,7 @@ defmodule QTest do
         |> Q.run(:read, fn _ -> {:ok, :read} end)
         |> Q.run(:write, fn %{read: _read} -> {:ok, :write} end)
 
-      assert [
-               {:init, {:put, :test}},
-               {:read, {:run, _}},
-               {:write, {:run, _}}
-             ] = Q.to_list(que)
+      assert [put: :init, run: :read, run: :write] = Q.to_list(que)
     end
   end
 
@@ -320,13 +332,13 @@ defmodule QTest do
         |> Q.debug()
 
       assert [:a, :b] = Q.operations(q)
-      assert [{:a, _}, {:debug, _}, {:b, _}, {:debug, _}] = Q.to_list(q)
+      assert [put: :a, debug: nil, put: :b, debug: nil] = Q.to_list(q)
     end
   end
 
   describe "negative cases" do
     test "duplicating an operation will raise and error" do
-      fun = fn _, _ -> {:ok, :ok} end
+      fun = fn _ -> {:ok, :ok} end
 
       assert_raise ArgumentError, ~r":run is already a member", fn ->
         Q.new() |> Q.run(:run, fun) |> Q.run(:run, fun)
@@ -351,11 +363,11 @@ defmodule QTest do
                    end
     end
 
-    test "passing and operation that is not a function or mfa tuple will error" do
-      assert_raise FunctionClauseError, fn ->
-        Q.new()
-        |> Q.run(:nil_op, nil)
-        |> Q.exec()
+    test "passing an operation that is not a function or mfa tuple raises" do
+      # apply/3 keeps the type checker from flagging the deliberately invalid function
+      assert_raise ArgumentError, ~r/expected a function, {module, function}/, fn ->
+        # credo:disable-for-next-line Credo.Check.Refactor.Apply
+        apply(Q, :run, [Q.new(), :nil_op, nil])
       end
     end
   end
@@ -367,8 +379,7 @@ defmodule QTest do
           put(:test, "value")
         end
 
-      assert %Q{} = result
-      assert [test: {:put, "value"}] = Q.to_list(result)
+      assert [put: :test] = Q.to_list(result)
     end
 
     test "DSL supports function references" do
