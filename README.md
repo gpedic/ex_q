@@ -1,6 +1,6 @@
 ![Build Status](https://github.com/gpedic/ex_q/actions/workflows/ci.yml/badge.svg?branch=master)
 [![Coverage Status](https://coveralls.io/repos/github/gpedic/ex_q/badge.svg?branch=master)](https://coveralls.io/github/gpedic/ex_q?branch=master)
-[![License](https://img.shields.io/hexpm/l/ex_q.svg)](https://github.com/gpedic/ex_q/blob/master/LICENSE.md)
+[![License](https://img.shields.io/hexpm/l/ex_q.svg)](https://github.com/gpedic/ex_q/blob/master/LICENSE)
 [![Last Updated](https://img.shields.io/github/last-commit/gpedic/ex_q.svg)](https://github.com/gpedic/ex_q/commits/master)
 
 # Q
@@ -13,7 +13,7 @@ Q simplifies building pipelines in three key ways:
 
 * **Never lose context**: Q like Ecto.Multi will always return all executed steps results. When a step breaks, Q returns all prior step results along with the failing step’s error.
 
-* **Control passed parameters**: Steps can operate on the entire pipeline state or on specific labels only. This reduces the need to rewrite functions to suite the pipeline or having to introduce anonyomous functions just to be able to pick the parameters.
+* **Control passed parameters**: Steps can operate on the entire pipeline state or on specific labels only. This reduces the need to rewrite functions to suit the pipeline or having to introduce anonymous functions just to be able to pick the parameters.
 
 * **Flexible Composition**: Q queues can be composed just like normal Elixir functions. Smaller pipelines can be combined to form larger ones.
 
@@ -112,7 +112,7 @@ defmodule ParamDemo do
       end)
 
       # Pass a multiple arguments from the state
-      run(:multi_arg, &MyModule.process_multiple/1, [:custom_extract, :some_data])
+      run(:multi_arg, &MyModule.process_multiple/2, [:custom_extract, :some_data])
 
       # The mfa version allows us to pass additional params directly
       # by default args will be prepended i.e.
@@ -141,7 +141,7 @@ Sometimes you don’t need the remaining steps once a certain condition is met. 
           put(:input, input)
           
           # Check cache first
-          run(:cache_check, fn %{key: key} ->
+          run(:cache_check, fn %{input: %{key: key}} ->
             cached = get_from_cache(key)
             if not is_nil(cached) do
               {:halt, cached}  # Skip expensive operation if cached
@@ -167,8 +167,8 @@ Sometimes you don’t need the remaining steps once a certain condition is met. 
   # run full pipeline when not cached
     {:ok, %{
         input: %{key: "BWBeN28Vb7cMEx7Ym8AUzs", data: %{...}},
-        cache_check: :not_found
-        processed: %{data: %{...}}
+        cache_check: :not_found,
+        processed: %{data: %{...}},
         cache: :ok
       }
 ```
@@ -180,12 +180,12 @@ Here are both approaches side by side.
 
 ### DSL
 ```elixir
-import Q
+import Q, only: [queue: 1, exec: 1]
 
 decode_q = queue do
   put(:base64_text, "aGVsbG8=")
   run(:decoded, &Base.decode64/1, [:base64_text])
-  run(:decoded_mfa, {Base, :decoded64, []}, [:base64_text])
+  run(:decoded_mfa, {Base, :decode64, []}, [:base64_text])
 end
 
 exec(decode_q)
@@ -199,7 +199,7 @@ exec(decode_q)
 decode_q = Q.new()
   |> Q.put(:base64_text, "aGVsbG8=")
   |> Q.run(:decoded, &Base.decode64/1, [:base64_text])
-  |> Q.run(:decoded_mfa, {Base, :decoded64, []}, [:base64_text])
+  |> Q.run(:decoded_mfa, {Base, :decode64, []}, [:base64_text])
 
 
 Q.exec(decode_q)
@@ -208,15 +208,21 @@ Q.exec(decode_q)
 {:ok, %{base64_text: "aGVsbG8=", decoded: "hello", decoded_mfa: "hello"}}
 ```
 
+### DSL limitations
+
+* Only the top-level statements of a `queue` block are DSL calls. Calls inside step functions are left alone, so `inspect/1` or a local `put/2` inside a `fn` behave as usual.
+* Steps can't be added conditionally: a `put`, `run`, `inspect` or `exec` inside `if`, `case` or another expression raises at compile time. Build the queue with the functional API when steps depend on runtime conditions.
+* `exec()` must be the last statement in the block.
+* `import Q` also imports `Q.inspect/2`, which clashes with `Kernel.inspect/2` in the importing module. Import only what you use, e.g. `import Q, only: [queue: 1, exec: 1]`.
+
 ## Installation
 
-If [available in Hex](https://hex.pm/docs/publish), the package can be installed
-by adding `ex_q` to your list of dependencies in `mix.exs`:
+Add `ex_q` to your list of dependencies in `mix.exs`:
 
 ```elixir
 def deps do
   [
-    {:ex_q, "~> 1.1"}
+    {:ex_q, "~> 1.2"}
   ]
 end
 ```

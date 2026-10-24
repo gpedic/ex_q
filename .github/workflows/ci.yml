@@ -8,18 +8,22 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     name: OTP ${{matrix.otp}} / Elixir ${{matrix.elixir}}
     strategy:
       matrix:
-        elixir: ["1.14", "1.18"]
-        otp: ["25.3.2.3"]
+        include:
+          - elixir: "1.15"
+            otp: "26"
+          - elixir: "1.20"
+            otp: "28"
+            lint: true
     env:
       MIX_ENV: test
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
 
     - name: Setup elixir
       uses: erlef/setup-beam@v1
@@ -27,17 +31,29 @@ jobs:
         elixir-version: ${{ matrix.elixir }}
         otp-version: ${{ matrix.otp }}
 
+    - name: Cache deps and build
+      uses: actions/cache@v4
+      with:
+        path: |
+          deps
+          _build
+        key: ${{ runner.os }}-mix-${{ matrix.otp }}-${{ matrix.elixir }}-${{ hashFiles('mix.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-mix-${{ matrix.otp }}-${{ matrix.elixir }}-
+
     - name: Install Dependencies
       run: mix deps.get
 
     - name: Validate Formatting
+      if: ${{ matrix.lint }}
       run: mix format --check-formatted
 
     - name: Compile
       run: mix compile --warnings-as-errors
 
     - name: Run Credo
+      if: ${{ matrix.lint }}
       run: mix credo --strict
 
     - name: Run Tests
-      run: MIX_ENV=test mix coveralls.github
+      run: mix coveralls.github
