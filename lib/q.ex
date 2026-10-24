@@ -382,6 +382,15 @@ defmodule Q do
   defp param_names(params) when is_list(params), do: params
 
   defp param_names({params, opts}) when is_list(params) and is_list(opts) do
+    case Keyword.keys(opts) -- [:order] do
+      [] ->
+        :ok
+
+      unknown ->
+        raise ArgumentError,
+              "unknown params options #{Kernel.inspect(unknown)}, the only supported option is :order"
+    end
+
     case Keyword.get(opts, :order, :prepend) do
       order when order in [:prepend, :append] ->
         params

@@ -221,6 +221,14 @@ defmodule QTest do
         |> Q.run(:b, {Map, :fetch, []}, {[:a], order: :sideways})
       end
     end
+
+    test "unknown params options raise when the step is added" do
+      assert_raise ArgumentError, ~r/unknown params options \[:ordr\]/, fn ->
+        Q.new()
+        |> Q.put(:a, 1)
+        |> Q.run(:b, {Map, :fetch, []}, {[:a], ordr: :append})
+      end
+    end
   end
 
   test "results are aggregated" do
