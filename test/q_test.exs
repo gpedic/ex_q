@@ -324,6 +324,138 @@ defmodule QTest do
     end
   end
 
+  describe "merge/3" do
+    defp checkout(total) do
+      Q.new()
+      |> Q.put(:total, total)
+      |> Q.merge(
+        fn total ->
+          if total > 100 do
+            Q.new() |> Q.put(:discount, 10)
+          else
+            Q.new() |> Q.put(:shipping, 5)
+          end
+        end,
+        [:total]
+      )
+      |> Q.run(:done, fn -> {:ok, true} end)
+      |> Q.exec()
+    end
+
+    test "adds steps chosen from earlier results" do
+      assert {:ok, %{total: 120, discount: 10, done: true}} = checkout(120)
+      assert {:ok, %{total: 50, shipping: 5, done: true}} = checkout(50)
+    end
+
+    test "the merge function can take the whole state or nothing" do
+      result =
+        Q.new()
+        |> Q.put(:a, 1)
+        |> Q.merge(fn %{a: a} -> Q.new() |> Q.put(:b, a + 1) end)
+        |> Q.merge(fn -> Q.new() |> Q.put(:c, 3) end)
+        |> Q.exec()
+
+      assert {:ok, %{a: 1, b: 2, c: 3}} = result
+    end
+
+    test "later steps can use merged results as params" do
+      result =
+        Q.new()
+        |> Q.merge(fn -> Q.new() |> Q.put(:b, 2) end)
+        |> Q.let(:c, &(&1 * 10), [:b])
+        |> Q.exec()
+
+      assert {:ok, %{b: 2, c: 20}} = result
+    end
+
+    test "a missing merged param raises when the queue runs" do
+      q =
+        Q.new()
+        |> Q.merge(fn -> Q.new() end)
+        |> Q.let(:c, &(&1 * 10), [:b])
+
+      assert_raise RuntimeError, ~r/the parameter :b is not in the state/, fn -> Q.exec(q) end
+    end
+
+    test "an error in the merged queue stops the pipeline with both states" do
+      result =
+        Q.new()
+        |> Q.put(:a, 1)
+        |> Q.merge(fn ->
+          Q.new()
+          |> Q.put(:inner, :ok)
+          |> Q.run(:failing, fn -> {:error, :boom} end)
+        end)
+        |> Q.run(:never, fn -> {:ok, :should_not_run} end)
+        |> Q.exec()
+
+      assert {:error, :failing, :boom, %{a: 1, inner: :ok}} = result
+    end
+
+    test "a halt in the merged queue halts the whole pipeline" do
+      result =
+        Q.new()
+        |> Q.merge(fn -> Q.new() |> Q.run(:stop, fn -> {:halt, :early} end) end)
+        |> Q.run(:never, fn -> {:ok, :should_not_run} end)
+        |> Q.exec()
+
+      assert {:ok, %{stop: :early}} = result
+    end
+
+    test "merged queues can merge" do
+      result =
+        Q.new()
+        |> Q.merge(fn ->
+          Q.new()
+          |> Q.put(:outer, 1)
+          |> Q.merge(fn -> Q.new() |> Q.put(:inner, 2) end)
+        end)
+        |> Q.exec()
+
+      assert {:ok, %{outer: 1, inner: 2}} = result
+    end
+
+    test "name conflicts with merged steps raise" do
+      assert_raise ArgumentError, ~r/merged step :a conflicts/, fn ->
+        Q.new()
+        |> Q.put(:a, 1)
+        |> Q.merge(fn -> Q.new() |> Q.put(:a, 2) end)
+        |> Q.exec()
+      end
+
+      assert_raise ArgumentError, ~r/step :b conflicts with a merged step/, fn ->
+        Q.new()
+        |> Q.merge(fn -> Q.new() |> Q.put(:b, 1) end)
+        |> Q.put(:b, 2)
+        |> Q.exec()
+      end
+    end
+
+    test "the merge function must return a queue" do
+      assert_raise RuntimeError, ~r/expected the merge function to return a Q, got: :nope/, fn ->
+        Q.new() |> Q.merge(fn -> :nope end) |> Q.exec()
+      end
+    end
+
+    test "works in the DSL" do
+      result =
+        queue do
+          put(:a, 1)
+          merge(fn a -> Q.new() |> Q.put(:b, a + 1) end, [:a])
+          merge(fn -> Q.new() |> Q.put(:c, 3) end)
+          exec()
+        end
+
+      assert {:ok, %{a: 1, b: 2, c: 3}} = result
+    end
+
+    test "is listed by to_list/1" do
+      q = Q.new() |> Q.merge(fn -> Q.new() end)
+      assert [merge: nil] = Q.to_list(q)
+      assert [] = Q.operations(q)
+    end
+  end
+
   describe "to_list/1" do
     test "returns a list of operations" do
       que =

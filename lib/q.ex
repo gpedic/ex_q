@@ -30,27 +30,31 @@ defmodule Q do
       end
 
   Only the top-level statements of the block are treated as DSL calls (`put/2`,
-  `run/2`, `run/3`, `let/2`, `let/3`, `debug/0`, `debug/1` and `exec/0`); calls inside step
+  `run/2`, `run/3`, `let/2`, `let/3`, `merge/1`, `merge/2`, `debug/0`, `debug/1` and `exec/0`);
+  calls inside step
   functions are left alone. Steps can't be added conditionally (inside `if`, `case`
   and the like) and `exec()` must be the last statement; both raise at compile time.
   Use the functional API to add steps conditionally.
   """
 
   alias __MODULE__
-  defstruct operations: [], names: MapSet.new()
-  @opaque t :: %__MODULE__{operations: [operation], names: MapSet.t()}
+  defstruct operations: [], names: MapSet.new(), merged: false
+  @opaque t :: %__MODULE__{operations: [operation], names: MapSet.t(), merged: boolean}
   @type state :: map
   @type name :: any
   @type result :: {:ok, any} | {:error, any} | :error | {:halt, any}
   @type step_fun :: (... -> result)
   @type fun_mfa :: {module, atom, [any]} | {module, atom}
   @type params :: [name] | {[name], [order: :prepend | :append]}
-  @type kind :: :put | :run | :let | :debug
+  @type kind :: :put | :run | :let | :merge | :debug
   @type exec_error :: {:error, name, any, state}
   @typep input :: :none | :state | {:keys, [name]}
   @typep call :: {:fun, function, input} | {:mfa, module, atom, [any], input, :prepend | :append}
   @typep operation ::
-           {:step, name, :put, any} | {:step, name, :run | :let, call} | {:debug, Keyword.t()}
+           {:step, name, :put, any}
+           | {:step, name, :run | :let, call}
+           | {:merge, call}
+           | {:debug, Keyword.t()}
 
   @doc """
   Creates and returns a new, empty `Q` struct.
@@ -98,7 +102,7 @@ defmodule Q do
   @doc """
   Lists the queue's operations in the order they were added, as `{kind, name}` tuples.
 
-  `kind` is the function that added the operation; `name` is `nil` for `debug/2`.
+  `kind` is the function that added the operation; `name` is `nil` for `merge/3` and `debug/2`.
 
   ## Example
       iex> Q.new()
@@ -114,6 +118,7 @@ defmodule Q do
     |> Enum.reverse()
     |> Enum.map(fn
       {:step, name, kind, _} -> {kind, name}
+      {:merge, _call} -> {:merge, nil}
       {:debug, _opts} -> {:debug, nil}
     end)
   end
@@ -237,6 +242,39 @@ defmodule Q do
   end
 
   @doc """
+  Adds steps at run time, chosen by a function of the results so far.
+
+  When the queue runs, `fun` is called like a `run/4` step function, with `params` working
+  the same way, and must return a queue. That queue runs with its own state, starting empty,
+  so pass values into it with a closure. Its results are then added to the state.
+
+  - If a step of the merged queue fails, `exec/1` returns that step's name and error, with
+    the state of both queues.
+  - If a step of the merged queue halts, the whole pipeline halts.
+  - A merged step whose name already exists in the state raises `ArgumentError`.
+
+  The names a merged queue produces aren't known until it runs, so params of steps added
+  after a merge are not checked when the steps are added. A missing one raises when the
+  queue runs.
+
+  ## Example
+      iex> Q.new()
+      ...> |> Q.put(:amount, 120)
+      ...> |> Q.merge(
+      ...>   fn amount ->
+      ...>     if amount > 100, do: Q.new() |> Q.put(:approval, :required), else: Q.new()
+      ...>   end,
+      ...>   [:amount]
+      ...> )
+      ...> |> Q.exec()
+      {:ok, %{amount: 120, approval: :required}}
+  """
+  @spec merge(t, (... -> t) | fun_mfa, params) :: t
+  def merge(%Q{} = queue, fun, params \\ []) do
+    %{add_op(queue, {:merge, build_call!(queue, fun, params)}) | merged: true}
+  end
+
+  @doc """
   Provides a DSL for creating a queue using a more declarative syntax.
 
   Only top-level statements are DSL calls; see the module documentation for the limitations.
@@ -295,6 +333,18 @@ defmodule Q do
   defp transform_dsl({:let, _meta, [name, fun]}) do
     quote do
       queue = Q.let(queue, unquote(name), unquote(fun), [])
+    end
+  end
+
+  defp transform_dsl({:merge, _meta, [fun, params]}) do
+    quote do
+      queue = Q.merge(queue, unquote(fun), unquote(params))
+    end
+  end
+
+  defp transform_dsl({:merge, _meta, [fun]}) do
+    quote do
+      queue = Q.merge(queue, unquote(fun), [])
     end
   end
 
@@ -372,6 +422,8 @@ defmodule Q do
   defp dsl_call?({:run, _, [_, _, _]}), do: true
   defp dsl_call?({:let, _, [_, _]}), do: true
   defp dsl_call?({:let, _, [_, _, _]}), do: true
+  defp dsl_call?({:merge, _, [_]}), do: true
+  defp dsl_call?({:merge, _, [_, _]}), do: true
   defp dsl_call?({:debug, _, []}), do: true
   defp dsl_call?({:debug, _, [_]}), do: true
   defp dsl_call?(_), do: false
@@ -388,9 +440,11 @@ defmodule Q do
 
   # Resolves a step function and its params into a call, so that mistakes are
   # caught when the step is added rather than when the queue runs.
-  defp build_call!(%Q{names: names}, fun, params) do
+  defp build_call!(%Q{names: names, merged: merged}, fun, params) do
     {keys, order} = normalize_params!(params)
-    check_params_existence(names, keys)
+
+    # Steps added by a merge are only known at run time, see merge/3
+    if not merged, do: check_params_existence(names, keys)
 
     case fun do
       fun when is_function(fun) ->
@@ -494,20 +548,39 @@ defmodule Q do
   end
 
   defp run_op({:step, name, :put, value}, {:ok, state}) do
-    {:cont, {:ok, Map.put(state, name, value)}}
+    {:cont, {:ok, store!(state, name, value)}}
   end
 
   defp run_op({:step, name, :let, call}, {:ok, state}) do
-    {:cont, {:ok, Map.put(state, name, call(call, state))}}
+    {:cont, {:ok, store!(state, name, call(call, state))}}
+  end
+
+  defp run_op({:merge, call}, {:ok, state}) do
+    case call(call, state) do
+      %Q{operations: operations} ->
+        case run_ops(Enum.reverse(operations), %{}) do
+          {:ok, merged} ->
+            {:cont, {:ok, merge_state!(state, merged)}}
+
+          {:halted, merged} ->
+            {:halt, {:halted, merge_state!(state, merged)}}
+
+          {:error, name, reason, merged} ->
+            {:halt, {:error, name, reason, merge_state!(state, merged)}}
+        end
+
+      other ->
+        raise "expected the merge function to return a Q, got: #{Kernel.inspect(other)}"
+    end
   end
 
   defp run_op({:step, name, :run, call}, {:ok, state}) do
     case call(call, state) do
       {:ok, value} ->
-        {:cont, {:ok, Map.put(state, name, value)}}
+        {:cont, {:ok, store!(state, name, value)}}
 
       {:halt, value} ->
-        {:halt, {:halted, Map.put(state, name, value)}}
+        {:halt, {:halted, store!(state, name, value)}}
 
       {:error, reason} ->
         {:halt, {:error, name, reason, state}}
@@ -530,5 +603,34 @@ defmodule Q do
 
   defp input_args(:none, _state), do: []
   defp input_args(:state, state), do: [state]
-  defp input_args({:keys, keys}, state), do: Enum.map(keys, &Map.fetch!(state, &1))
+
+  defp input_args({:keys, keys}, state) do
+    Enum.map(keys, fn key ->
+      case Map.fetch(state, key) do
+        {:ok, value} ->
+          value
+
+        :error ->
+          raise "the parameter #{Kernel.inspect(key)} is not in the state, " <>
+                  "it was expected from a merged queue"
+      end
+    end)
+  end
+
+  # Names are unique within a queue, so a clash is only possible with a merged queue
+  defp store!(state, name, value) do
+    if Map.has_key?(state, name) do
+      raise ArgumentError,
+            "step #{Kernel.inspect(name)} conflicts with a merged step of the same name"
+    end
+
+    Map.put(state, name, value)
+  end
+
+  defp merge_state!(state, merged) do
+    Map.merge(state, merged, fn name, _, _ ->
+      raise ArgumentError,
+            "merged step #{Kernel.inspect(name)} conflicts with a step of the same name"
+    end)
+  end
 end
