@@ -2,53 +2,55 @@ defmodule Q do
   @moduledoc """
   Build pipelines of named steps, in the spirit of `Ecto.Multi`, and run them with `exec/1`.
 
-  Every step's result is stored in a state map under the step's name. Later steps
-  receive the whole state, or only the keys they ask for. When a step fails, `exec/1`
-  returns the failing step's name and error together with the state built so far.
+  Every step's result is stored in a state map under the step's name. When a step fails,
+  `exec/1` returns the failing step's name and error together with the state built so far.
 
-  ## Steps
+  ## Writing a pipeline
 
-    * `put/3` stores a value.
-    * `run/4` runs a function that can fail.
-    * `let/4` runs a function that can't fail, and stores its return value as is.
-    * `merge/3` adds steps at run time, chosen from the results so far.
-    * `debug/2` prints the state.
+  Pipelines are written with `queue/1`, where every step is a binding:
 
-  Steps named with an atom starting with `_`, such as `:_notified`, run but their result
-  isn't stored, and the name doesn't have to be unique. A failure still reports the name.
+      import Q
 
-  A `run/4` function must return one of:
+      queue do
+        input = data                       # stores a value
+        trimmed = String.trim(input)       # a function that can't fail
+        decoded <- Base.decode64(trimmed)  # a function that can fail
+        _ <- Notifier.notify(decoded)      # runs, but isn't stored
+        exec()
+      end
+
+  A step's inputs are the earlier steps its expression uses; other variables are captured
+  as in any closure. `if`, `unless`, `case` and `cond` around steps choose which steps run
+  from earlier results. See `queue/1` for all the rules.
+
+  ## Results
+
+  A step written with `<-` must return one of:
 
     * `{:ok, value}` - stores `value` under the step's name and continues
     * `{:error, reason}` - stops; `exec/1` returns `{:error, name, reason, state}`
     * `:error` - same as `{:error, :error}`, for functions such as `Base.decode64/1`
     * `{:halt, value}` - stores `value` and stops; `exec/1` returns `{:ok, state}`
 
-  Any other return value raises.
+  Any other return value raises. A step written with `=` stores its value as is.
 
-  ## Function input
+  ## Building queues programmatically
 
-  A step function receives the values of the keys listed in its `params`. Without
+  `queue/1` compiles to the functions below, which can be used directly when the steps
+  come from data, such as a step per item:
+
+    * `put/3` stores a value.
+    * `run/4` runs a function that can fail, like `<-`.
+    * `let/4` runs a function that can't fail, like `=`.
+    * `merge/3` adds steps at run time, chosen from the results so far.
+    * `debug/2` prints the state.
+
+  Here a step function receives the values of the keys listed in its `params`. Without
   `params` it receives the whole state, or nothing if it is an anonymous function of
   arity 0. See `run/4` for `{module, function, args}` functions.
 
-  ## DSL
-
-  `queue/1` offers the same API without the piping:
-
-      import Q
-
-      queue do
-        put(:input, "aGVsbG8=")
-        run(:decoded, &Base.decode64/1, [:input])
-        exec()
-      end
-
-  Only the top-level statements of the block are treated as DSL calls (`put/2`, `run/2`,
-  `run/3`, `let/2`, `let/3`, `merge/1`, `merge/2`, `debug/0`, `debug/1` and `exec/0`);
-  calls inside step functions are left alone. Steps can't be added inside `if`, `case`
-  and the like, and `exec()` must be the last statement; both raise at compile time.
-  Use `merge/3` to choose steps based on earlier results.
+  Steps named with an atom starting with `_`, such as `:_notified`, run but their result
+  isn't stored, and the name doesn't have to be unique. A failure still reports the name.
   """
 
   alias __MODULE__
@@ -258,6 +260,10 @@ defmodule Q do
   @doc """
   Adds steps at run time, chosen by a function of the results so far.
 
+  A queue is built before its steps run, so no step can decide which steps come next.
+  In a `queue/1` block, write `if` or `case` around the steps instead; it compiles to
+  `merge/3`. This is the explicit form, and works like `Ecto.Multi.merge/2`.
+
   When the queue runs, `fun` is called like a `run/4` step function, with `params` working
   the same way, and must return a queue. That queue runs with its own state, starting empty,
   so pass values into it with a closure. Its results are then added to the state.
@@ -289,8 +295,40 @@ defmodule Q do
   end
 
   @doc """
-  Builds a queue from bindings: `name = expr` for steps that can't fail, `name <- expr` for
-  steps that can. See the module documentation.
+  Builds a queue from a block of steps.
+
+  Each statement is one of:
+
+    * `name = expr` - a step storing the value of `expr`, for values and functions that
+      can't fail (compiles to `let/4`)
+    * `name <- expr` - a step for functions returning `{:ok, value}`, `{:error, reason}`,
+      `:error` or `{:halt, value}` (compiles to `run/4`)
+    * `debug()` or `debug(opts)` - prints the state, see `debug/2`
+    * `merge(expr)` - runs the queue `expr` evaluates to, see `merge/3`
+    * `if`, `unless`, `case` or `cond` containing steps - the branch taken adds its steps
+    * `exec()` - runs the queue, as the last statement only
+
+  Rules:
+
+    * The step is named after the variable, and its inputs are the earlier steps `expr`
+      uses. Other variables are captured as in any closure.
+    * The left side is a single variable, and a name is bound once. Names starting with `_`
+      run without being stored, and can repeat.
+    * A step bound inside a branch is in the result, but can't be used after the conditional.
+    * Expressions are evaluated when the queue runs, not when it's built.
+
+  Breaking a rule is a compile error. The block returns the queue, unless it ends with
+  `exec()`.
+
+  ## Example
+      iex> import Q
+      iex> queue do
+      ...>   input = "aGVsbG8="
+      ...>   decoded <- Base.decode64(input)
+      ...>   if decoded == "hello", do: greeting = true
+      ...>   exec()
+      ...> end
+      {:ok, %{input: "aGVsbG8=", decoded: "hello", greeting: true}}
   """
   defmacro queue(do: block) do
     Q.DSL.compile(block, __CALLER__)

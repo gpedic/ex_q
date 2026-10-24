@@ -9,19 +9,13 @@ Q is a tool for building and executing pipelines of operations, influenced by Ec
 
 ## Why Q?
 
-Q simplifies building pipelines in three key ways:
+* **Never lose context**: like Ecto.Multi, Q returns the results of all executed steps. When a step breaks, Q returns all prior step results along with the failing step's name and error.
 
-* **Never lose context**: Q like Ecto.Multi will always return all executed steps results. When a step breaks, Q returns all prior step results along with the failing step’s error.
+* **Plain Elixir**: steps are written like the bindings of a `with` chain. Q works out which earlier results each step needs, so step functions don't have to be wrapped or rewritten to fit the pipeline.
 
-* **Control passed parameters**: Steps can operate on the entire pipeline state or on specific labels only. This reduces the need to rewrite functions to suit the pipeline or having to introduce anonymous functions just to be able to pick the parameters.
-
-* **Flexible Composition**: Q queues are plain values, so functions that add steps to a queue can be piped together to form larger pipelines (see [Composition](#composition)).
-
+* **Branch on results**: wrap steps in `if` or `case` to choose what runs next based on what earlier steps returned.
 
 ## Example
-
-A pipeline (or “queue”) is a collection of labeled steps that transform data. Each step can take the entire pipeline state or selected portions of it. 
-Results are always labeled and retained:
 
 ```elixir
 defmodule UploadProcessor do
@@ -29,222 +23,191 @@ defmodule UploadProcessor do
 
   def process_upload(file_data) do
     queue do
-      put(:file_data, file_data)
-      run(:parsed, &DataProcessor.parse_csv/1, [:file_data])
-      run(:validated, fn %{parsed: rows} ->
-        Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, acc} ->
-          case DataProcessor.validate_row(row) do
-            {:ok, valid} -> {:cont, {:ok, [valid | acc]}}
-            {:error, _} = err -> {:halt, err}
-          end
-        end)
-      end)
-      run(:enriched, {DataProcessor, :enrich_data, [[use_ai: true]]}, [:validated])
+      file = file_data
+      parsed <- DataProcessor.parse_csv(file)
+      validated <- validate_rows(parsed)
+      enriched <- DataProcessor.enrich_data(validated, use_ai: true)
     end
     |> exec()
   end
+
+  defp validate_rows(rows) do
+    Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, acc} ->
+      case DataProcessor.validate_row(row) do
+        {:ok, valid} -> {:cont, {:ok, [valid | acc]}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
 end
+
+# {:ok, %{file: ..., parsed: ..., validated: ..., enriched: ...}}
 ```
 
 ## Error handling
 
-One of the major benefits of using Q is that it provides a complete context even in case of errors - you know not only which step failed but have access to all results leading up to the error.
+Q provides the complete context even when something fails: you know which step failed, and you have the results of every step before it.
 
 ```elixir
 def process_data(data) do
   queue do
-    put(:raw_data, data)
-    run(:decoded, &Jason.decode/1, [:raw_data])
-    run(:validated, &validate_schema/1, [:decoded])
-    run(:normalized, &normalize_data/1, [:validated])
-    run(:enriched, &add_metadata/1, [:normalized])
+    raw = data
+    decoded <- Jason.decode(raw)
+    validated <- validate_schema(decoded)
+    normalized <- normalize_data(validated)
+    enriched <- add_metadata(normalized)
     exec()
   end
 end
 
 # If JSON parsing fails
-{:error, :decoded, %Jason.DecodeError{data: "invalid", position: 0, token: nil}, %{raw_data: "invalid"}}
+{:error, :decoded, %Jason.DecodeError{data: "invalid", position: 0, token: nil}, %{raw: "invalid"}}
 
-# If validation fails, notice both previous processing steps results are available
+# If validation fails, the results of the previous steps are available
 {:error, :validated, :invalid_schema, %{
-  raw_data: "{\"foo\": 123}",
+  raw: "{\"foo\": 123}",
   decoded: %{"foo" => 123}
 }}
-
 ```
 
 Steps can return `{:error, reason}` or a bare `:error`, so functions like `Base.decode64/1` or `Map.fetch/2` work as steps without wrapping. A bare `:error` is reported as `{:error, step, :error, state}`.
 
 ### Without Q
+
 ```elixir
 def process_data_without_q(data) do
   with {:ok, decoded} <- Jason.decode(data),
-    {:ok, validated} <- validate_data(data),
-    {:ok, transformed} <- normalize_data(validated),
-    {:ok, enriched} <- add_metadata(transformed) do
+       {:ok, validated} <- validate_schema(decoded),
+       {:ok, normalized} <- normalize_data(validated),
+       {:ok, enriched} <- add_metadata(normalized) do
     {:ok, enriched}
   else
-    {:error, reason} -> 
-      # We know the failure reason, but not the state when it failed
-      # as the data from of processing steps is not available here
+    {:error, reason} ->
+      # We know the failure reason, but not which step failed,
+      # and the results of the earlier steps are gone
       {:error, reason}
   end
 end
 ```
 
-## Parameter Passing
+## Writing steps
 
-Every step function will receive the entire pipeline state by default, or you can list which keys you want to pass as function arguments. An anonymous function of arity 0 without params receives nothing. The function's arity is checked when the step is added, so a mismatch raises right away instead of when the pipeline runs.
-
-```elixir
-defmodule ParamDemo do
-  import Q
-
-  def run_stuff(data) do
-    queue do
-      # Store some data for subsequent steps
-      put(:some_data, data)
-
-      # Pass a single argument from the state
-      run(:single_arg, &MyModule.process_single/1, [:some_data])
-
-      # Pass the complete state
-      run(:custom_extract, fn %{single_arg: val} ->
-        MyModule.do_something(val)
-      end)
-
-      # Pass a multiple arguments from the state
-      run(:multi_arg, &MyModule.process_multiple/2, [:custom_extract, :some_data])
-
-      # Use let for functions that can't fail: the return value is stored as is,
-      # without wrapping it in {:ok, value}
-      let(:normalized, &String.trim/1, [:some_data])
-
-      # Pass nothing
-      let(:started_at, fn -> DateTime.utc_now() end)
-
-      # The mfa version allows us to pass additional params directly
-      # by default args will be prepended i.e.
-      # MyModule.delete(single_arg, some_data, soft_delete: true)
-      run(:prepend_args, {MyModule, :delete, [[soft_delete: true]]}, [:single_arg, :some_data])
-
-      # To append the arguments instead we can define the order
-      # MyModule.changeset(%MyStruct{}, single_arg, some_data)
-      run(:appended_args, {MyModule, :changeset, [%MyStruct{}]}, {[:single_arg, :some_data], order: :append})
-    end
-    |> exec()
-  end
-end
-```
-
-## Halting Execution Early
-
-Sometimes you don’t need the remaining steps once a certain condition is met. Q allows functions to return `{:halt, value}` to end the pipeline successfully:
-
-```elixir
-    defmodule ExpensiveProcessor do
-      import Q
-
-      def process_data(input) do
-        queue do
-          put(:input, input)
-          
-          # Check cache first
-          run(:cache_check, fn %{input: %{key: key}} ->
-            cached = get_from_cache(key)
-            if not is_nil(cached) do
-              {:halt, cached}  # Skip expensive operation if cached
-            else
-              {:ok, :not_found}
-            end
-          end)
-
-          # Only runs if not in cache
-          run(:processed, &expensive_operation/1, [:input])
-          run(:cache, &cache_processed_data/1, [:processed])
-
-          exec()
-        end
-      end
-    end
-
-  # halt early on cache hit
-  {:ok, %{
-        input: %{key: "BWBeN28Vb7cMEx7Ym8AUzs", data: %{...}},
-        cache_check: %{data: %{...}}
-      }
-
-  # run full pipeline when not cached
-    {:ok, %{
-        input: %{key: "BWBeN28Vb7cMEx7Ym8AUzs", data: %{...}},
-        cache_check: :not_found,
-        processed: %{data: %{...}},
-        cache: :ok
-      }
-```
-
-## Branching with merge
-
-Steps can't be wrapped in `if` or `case`, because the queue is built before any step runs. To choose steps based on a result, use `merge`: its function is called with earlier results, like a step function, and returns a queue whose steps run next.
+Every step is a binding, and the variable names the step:
 
 ```elixir
 queue do
-  put(:order, order)
-  run(:total, &Orders.total/1, [:order])
+  # = stores the value of an expression: a value, or a function that can't fail
+  input = data
+  trimmed = String.trim(input)
 
-  merge(fn total ->
-    if total > 100 do
-      Q.new() |> Q.run(:approval, fn -> Approvals.request(order) end)
-    else
-      Q.new()
-    end
-  end, [:total])
+  # <- runs a function that returns {:ok, value}, {:error, reason} or :error,
+  # and stores the value
+  decoded <- Base.decode64(trimmed)
 
-  run(:charged, &Payments.charge/1, [:order])
+  # _ runs a step without storing its result
+  _ <- Notifier.notify(decoded)
+end
+```
+
+A step's inputs are the earlier steps its expression uses: `decoded <- Base.decode64(trimmed)` depends on `trimmed`. Other variables, such as function arguments, are captured as in any closure. Steps run in order when the queue is executed, and each result is stored under the step's name.
+
+The block returns the queue. Run it with `exec()` as the last statement, or by piping it into `exec/1`.
+
+## Halting execution early
+
+A step can return `{:halt, value}` to end the pipeline successfully, skipping the remaining steps:
+
+```elixir
+def process_data(input) do
+  queue do
+    request = input
+    cached <- check_cache(request.key)
+    processed <- expensive_operation(request)
+    _ <- store_in_cache(request.key, processed)
+    exec()
+  end
+end
+
+defp check_cache(key) do
+  case get_from_cache(key) do
+    nil -> {:ok, :not_found}
+    cached -> {:halt, cached}
+  end
+end
+
+# Cache hit
+{:ok, %{request: %{key: "BWBeN28Vb7cMEx7Ym8AUzs", ...}, cached: %{...}}}
+
+# Cache miss
+{:ok, %{request: %{key: "BWBeN28Vb7cMEx7Ym8AUzs", ...}, cached: :not_found, processed: %{...}}}
+```
+
+## Branching
+
+Wrap steps in `if`, `unless`, `case` or `cond` to choose which steps run based on earlier results:
+
+```elixir
+queue do
+  total <- Orders.total(order)
+
+  if total > 100 do
+    approval <- Approvals.request(order)
+  end
+
+  charged <- Payments.charge(order)
   exec()
 end
 ```
 
-The merged queue runs with its own state, so pass values into it with a closure, as with `order` above. Its results are added to the pipeline's state, and an error or halt in it stops the whole pipeline like any other step.
+Steps in the branch that runs are added to the result, and an error or halt in them stops the pipeline like any other step. As with variables in Elixir, a step bound inside a branch can't be used after the conditional.
 
-## API
+A conditional compiles to `merge`, which works like `Ecto.Multi.merge`: a function of the results so far returns a queue, whose steps run next with their own state. `merge` is also a statement, to include a queue built by another function:
 
-Q provides two styles, the DSL and a more functional chaining API.
-Here are both approaches side by side.
-
-### DSL
 ```elixir
-import Q
+queue do
+  user <- Accounts.fetch_user(id)
+  merge(onboarding_steps(user))
+  exec()
+end
+```
 
-decode_q = queue do
-  put(:base64_text, "aGVsbG8=")
-  run(:decoded, &Base.decode64/1, [:base64_text])
-  run(:decoded_mfa, {Base, :decode64, []}, [:base64_text])
+## Debugging
+
+`debug()` prints the state at that point of the pipeline when it runs. Pass `only:` to print selected keys:
+
+```elixir
+queue do
+  a = 1
+  b = 2
+  debug(only: :a)
+  exec()
 end
 
-exec(decode_q)
-
-# Returns:
-{:ok, %{base64_text: "aGVsbG8=", decoded: "hello", decoded_mfa: "hello"}}
+# Prints:
+%{a: 1}
 ```
 
-### Functional
+## Rules
+
+* Every statement in a `queue` block is a step (`name = expr` or `name <- expr`), `debug()`, `merge(queue)`, a conditional containing steps, or `exec()` as the last statement. Use `_ = expr` to run an expression without storing its result.
+* The left side of a step is a single variable, and each name is bound once. Names starting with `_` aren't stored and can repeat.
+* Mistakes are compile errors pointing at the line.
+
+## Building queues programmatically
+
+The `queue` block compiles to the functional API in `Q`, which is also available directly. Use it when the steps come from data, such as a step per item or names that aren't variables:
+
 ```elixir
-decode_q = Q.new()
-  |> Q.put(:base64_text, "aGVsbG8=")
-  |> Q.run(:decoded, &Base.decode64/1, [:base64_text])
-  |> Q.run(:decoded_mfa, {Base, :decode64, []}, [:base64_text])
-
-
-Q.exec(decode_q)
-
-# Returns:
-{:ok, %{base64_text: "aGVsbG8=", decoded: "hello", decoded_mfa: "hello"}}
+users
+|> Enum.reduce(Q.new(), fn user, q ->
+  Q.run(q, {:invite, user.id}, fn -> Mailer.invite(user) end)
+end)
+|> Q.exec()
 ```
 
-### Composition
+Here a step's inputs are listed explicitly: `decoded <- Base.decode64(trimmed)` in a `queue` block is `Q.run(q, :decoded, &Base.decode64/1, [:trimmed])`. See the [documentation](https://hexdocs.pm/ex_q/Q.html) for `put/3`, `run/4`, `let/4`, `merge/3` and `debug/2`.
 
-A queue is a plain value, so a function that takes a queue and adds steps to it composes like any other function:
+A queue is a plain value, so functions that add steps to it compose like any other function:
 
 ```elixir
 def parse(q), do: Q.run(q, :parsed, &CSV.parse/1, [:file])
@@ -256,27 +219,6 @@ Q.new()
 |> validate()
 |> Q.exec()
 ```
-
-### Debugging
-
-`debug/2` (`debug()` in the DSL) prints the state at that point of the pipeline when it runs. Pass `only:` to print selected keys:
-
-```elixir
-Q.new()
-|> Q.put(:a, 1)
-|> Q.put(:b, 2)
-|> Q.debug(only: :a)
-|> Q.exec()
-
-# Prints:
-%{a: 1}
-```
-
-### DSL limitations
-
-* Only the top-level statements of a `queue` block are DSL calls. Calls inside step functions are left alone, so a local `put/2` inside a `fn` behaves as usual.
-* Steps can't be added conditionally: a `put`, `run`, `let`, `merge`, `debug` or `exec` inside `if`, `case` or another expression raises at compile time. Use [`merge`](#branching-with-merge) to choose steps based on earlier results.
-* `exec()` must be the last statement in the block.
 
 ## Installation
 

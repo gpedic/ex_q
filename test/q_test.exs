@@ -457,11 +457,15 @@ defmodule QTest do
         |> Q.put(:init, :test)
         |> Q.put(:init2, :test2)
 
-      assert capture_io(fn ->
-               que
-               |> Q.debug()
-               |> Q.exec()
-             end) == "%{init: :test, init2: :test2}\n"
+      # Not compared as a string, as the order of atom keys in a printed map isn't stable
+      printed =
+        capture_io(fn ->
+          que
+          |> Q.debug()
+          |> Q.exec()
+        end)
+
+      assert {%{init: :test, init2: :test2}, []} = Code.eval_string(printed)
 
       assert capture_io(fn ->
                que

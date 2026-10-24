@@ -192,14 +192,15 @@ defmodule Q.DSLTest do
         capture_io(fn ->
           queue do
             a = 1
-            b = 2
             debug()
-            debug(only: :a)
+            b = 2
+            debug(only: :b)
             exec()
           end
         end)
 
-      assert output == "%{a: 1, b: 2}\n%{a: 1}\n"
+      # One key per print, as the order of atom keys in a printed map isn't stable
+      assert output == "%{a: 1}\n%{b: 2}\n"
     end
 
     test "merge includes a queue built elsewhere" do
