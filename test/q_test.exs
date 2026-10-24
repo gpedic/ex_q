@@ -29,7 +29,8 @@ defmodule QTest do
   end
 
   defmodule DSLScoping do
-    import Q, only: [queue: 1]
+    # A plain import, to check Q no longer clashes with Kernel.inspect/1
+    import Q
 
     defp put(key, value), do: {key, value}
 
@@ -42,13 +43,13 @@ defmodule QTest do
       end
     end
 
-    def inspect_calls do
+    def debug_calls do
       queue do
         label = inspect(:x)
         put(:label, label)
         put(:other, 1)
-        inspect()
-        inspect(only: :label)
+        debug()
+        debug(only: :label)
         exec()
       end
     end
@@ -271,7 +272,7 @@ defmodule QTest do
     end
   end
 
-  describe "inspect/2" do
+  describe "debug/2" do
     test "printing stuff" do
       que =
         Q.new()
@@ -280,15 +281,27 @@ defmodule QTest do
 
       assert capture_io(fn ->
                que
-               |> Q.inspect()
+               |> Q.debug()
                |> Q.exec()
              end) == "%{init: :test, init2: :test2}\n"
 
       assert capture_io(fn ->
                que
-               |> Q.inspect(only: :init)
+               |> Q.debug(only: :init)
                |> Q.exec()
              end) == "%{init: :test}\n"
+    end
+
+    test "debug operations are not listed by operations/1" do
+      q =
+        Q.new()
+        |> Q.put(:a, 1)
+        |> Q.debug()
+        |> Q.put(:b, 2)
+        |> Q.debug()
+
+      assert [:a, :b] = Q.operations(q)
+      assert [{:a, _}, {:debug, _}, {:b, _}, {:debug, _}] = Q.to_list(q)
     end
   end
 
@@ -441,10 +454,10 @@ defmodule QTest do
       assert {:ok, %{n: 42, label: "42", pair: {:n, 42}}} = DSLScoping.nested_calls()
     end
 
-    test "top-level inspect is a DSL call, nested inspect/1 is Kernel.inspect/1" do
+    test "top-level debug is a DSL call, inspect/1 is Kernel.inspect/1" do
       output =
         capture_io(fn ->
-          assert {:ok, %{label: ":x", other: 1}} = DSLScoping.inspect_calls()
+          assert {:ok, %{label: ":x", other: 1}} = DSLScoping.debug_calls()
         end)
 
       assert output == "%{label: \":x\", other: 1}\n%{label: \":x\"}\n"
@@ -501,6 +514,21 @@ defmodule QTest do
           put(:a, 1)
         end
         """)
+      end
+    end
+
+    test "a top-level inspect() points at the rename to debug()" do
+      for call <- ["inspect()", "inspect(only: :a)"] do
+        assert_raise ArgumentError, ~r"inspect was renamed to debug", fn ->
+          Code.eval_string("""
+          import Q, only: [queue: 1]
+
+          queue do
+            put(:a, 1)
+            #{call}
+          end
+          """)
+        end
       end
     end
   end

@@ -20,7 +20,7 @@ defmodule Q do
 
   `queue/1` offers the same API without the piping:
 
-      import Q, only: [queue: 1]
+      import Q
 
       queue do
         put(:input, "aGVsbG8=")
@@ -29,14 +29,10 @@ defmodule Q do
       end
 
   Only the top-level statements of the block are treated as DSL calls (`put/2`,
-  `run/2`, `run/3`, `inspect/0`, `inspect/1` and `exec/0`); calls inside step
+  `run/2`, `run/3`, `debug/0`, `debug/1` and `exec/0`); calls inside step
   functions are left alone. Steps can't be added conditionally (inside `if`, `case`
   and the like) and `exec()` must be the last statement; both raise at compile time.
   Use the functional API to add steps conditionally.
-
-  A plain `import Q` also imports `Q.inspect/2`, which makes calls to `inspect/1,2`
-  in the importing module ambiguous with `Kernel.inspect/2`. Import only what you
-  need, as above.
   """
 
   alias __MODULE__
@@ -51,7 +47,7 @@ defmodule Q do
   @typep operation ::
            {:run, {step_fun, params} | {module, atom, [any], params}}
            | {:put, any}
-           | {:inspect, Keyword.t()}
+           | {:debug, Keyword.t()}
   @typep operations :: [{name, operation}]
   @typep names :: MapSet.t()
   @type name :: any
@@ -128,6 +124,7 @@ defmodule Q do
   @spec operations(Q.t()) :: list
   def operations(%Q{operations: operations}) do
     operations
+    |> Enum.reject(&match?({:debug, {:debug, _}}, &1))
     |> Enum.map(fn {op_name, _} -> op_name end)
     |> Enum.reverse()
   end
@@ -140,13 +137,13 @@ defmodule Q do
 
   ## Params
 
-  - `queue`: The queue to inspect.
+  - `queue`: The queue to debug.
   - `opts`: Options passed to `IO.inspect/2`. If the `:only` option is provided, only those keys will be printed.
 
   """
-  @spec inspect(t, Keyword.t()) :: t
-  def inspect(queue, opts \\ []) do
-    Map.update!(queue, :operations, &[{:inspect, {:inspect, opts}} | &1])
+  @spec debug(t, Keyword.t()) :: t
+  def debug(queue, opts \\ []) do
+    Map.update!(queue, :operations, &[{:debug, {:debug, opts}} | &1])
   end
 
   @doc """
@@ -270,44 +267,43 @@ defmodule Q do
     end
   end
 
-  @doc false
-  def transform_dsl({:exec, _meta, []}) do
+  defp transform_dsl({:exec, _meta, []}) do
     quote do
       queue = Q.exec(queue)
     end
   end
 
-  def transform_dsl({:put, _meta, [name, value]}) do
+  defp transform_dsl({:put, _meta, [name, value]}) do
     quote do
       queue = Q.put(queue, unquote(name), unquote(value))
     end
   end
 
-  def transform_dsl({:run, _meta, [name, fun, params]}) do
+  defp transform_dsl({:run, _meta, [name, fun, params]}) do
     quote do
       queue = Q.run(queue, unquote(name), unquote(fun), unquote(params))
     end
   end
 
-  def transform_dsl({:run, _meta, [name, fun]}) do
+  defp transform_dsl({:run, _meta, [name, fun]}) do
     quote do
       queue = Q.run(queue, unquote(name), unquote(fun), [])
     end
   end
 
-  def transform_dsl({:inspect, _meta, []}) do
+  defp transform_dsl({:debug, _meta, []}) do
     quote do
-      queue = Q.inspect(queue)
+      queue = Q.debug(queue)
     end
   end
 
-  def transform_dsl({:inspect, _meta, [opts]}) do
+  defp transform_dsl({:debug, _meta, [opts]}) do
     quote do
-      queue = Q.inspect(queue, unquote(opts))
+      queue = Q.debug(queue, unquote(opts))
     end
   end
 
-  def transform_dsl(other), do: other
+  defp transform_dsl(other), do: other
 
   defp dsl_statements({:__block__, _meta, statements}), do: statements
   defp dsl_statements(statement), do: [statement]
@@ -322,6 +318,10 @@ defmodule Q do
         raise ArgumentError, "exec() must be the last statement in queue/1"
       end
 
+      if match?({:inspect, _, args} when args in [[]] or length(args) == 1, statement) do
+        raise ArgumentError, "inspect was renamed to debug in Q 2.0"
+      end
+
       reject_nested_dsl!(statement)
     end)
   end
@@ -329,8 +329,7 @@ defmodule Q do
   # Steps can only be added by top-level statements. A DSL call nested in another
   # expression (`if`, `case`, an assignment, ...) would not add its step to the
   # queue, so it is rejected. Function bodies are skipped: calls in there belong
-  # to the step, not the DSL. `inspect/1` is not checked as it is usually
-  # `Kernel.inspect/1`.
+  # to the step, not the DSL.
   defp reject_nested_dsl!(statement) do
     if dsl_call?(statement) do
       {_name, _meta, args} = statement
@@ -344,9 +343,6 @@ defmodule Q do
     Macro.prewalk(ast, fn
       {:fn, _, _} ->
         nil
-
-      {:inspect, _, [_]} = node ->
-        node
 
       {name, _, args} = node when is_atom(name) and is_list(args) ->
         if dsl_call?(node) do
@@ -367,8 +363,8 @@ defmodule Q do
   defp dsl_call?({:put, _, [_, _]}), do: true
   defp dsl_call?({:run, _, [_, _]}), do: true
   defp dsl_call?({:run, _, [_, _, _]}), do: true
-  defp dsl_call?({:inspect, _, []}), do: true
-  defp dsl_call?({:inspect, _, [_]}), do: true
+  defp dsl_call?({:debug, _, []}), do: true
+  defp dsl_call?({:debug, _, [_]}), do: true
   defp dsl_call?(_), do: false
 
   defp add_operation(%Q{} = queue, name, operation, params) do
@@ -406,7 +402,7 @@ defmodule Q do
     Enum.reduce_while(operations, {:ok, %{}}, &apply_operation/2)
   end
 
-  defp apply_operation({:inspect, {:inspect, opts}}, {:ok, acc}) do
+  defp apply_operation({:debug, {:debug, opts}}, {:ok, acc}) do
     if opts[:only] do
       # credo:disable-for-next-line Credo.Check.Warning.IoInspect
       acc |> Map.take(List.wrap(opts[:only])) |> IO.inspect(opts)
