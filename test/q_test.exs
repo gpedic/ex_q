@@ -42,6 +42,17 @@ defmodule QTest do
       end
     end
 
+    def inspect_calls do
+      queue do
+        label = inspect(:x)
+        put(:label, label)
+        put(:other, 1)
+        inspect()
+        inspect(only: :label)
+        exec()
+      end
+    end
+
     def caller_variable(queue) do
       queue do
         put(:queue_name, queue)
@@ -428,6 +439,24 @@ defmodule QTest do
 
     test "only top-level statements are rewritten" do
       assert {:ok, %{n: 42, label: "42", pair: {:n, 42}}} = DSLScoping.nested_calls()
+    end
+
+    test "top-level inspect is a DSL call, nested inspect/1 is Kernel.inspect/1" do
+      output =
+        capture_io(fn ->
+          assert {:ok, %{label: ":x", other: 1}} = DSLScoping.inspect_calls()
+        end)
+
+      assert output == "%{label: \":x\", other: 1}\n%{label: \":x\"}\n"
+    end
+
+    test "an empty block builds an empty queue" do
+      empty =
+        queue do
+        end
+
+      assert {:ok, nil} = Q.exec(empty)
+      assert {:ok, nil} = queue(do: nil) |> Q.exec()
     end
 
     test "a caller variable named queue is not shadowed" do

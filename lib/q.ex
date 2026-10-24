@@ -310,7 +310,6 @@ defmodule Q do
   def transform_dsl(other), do: other
 
   defp dsl_statements({:__block__, _meta, statements}), do: statements
-  defp dsl_statements(nil), do: []
   defp dsl_statements(statement), do: [statement]
 
   defp validate_dsl!(statements) do
@@ -332,15 +331,14 @@ defmodule Q do
   # queue, so it is rejected. Function bodies are skipped: calls in there belong
   # to the step, not the DSL. `inspect/1` is not checked as it is usually
   # `Kernel.inspect/1`.
-  defp reject_nested_dsl!({_name, _meta, args} = statement) when is_list(args) do
+  defp reject_nested_dsl!(statement) do
     if dsl_call?(statement) do
+      {_name, _meta, args} = statement
       Enum.each(args, &find_nested_dsl!/1)
     else
       find_nested_dsl!(statement)
     end
   end
-
-  defp reject_nested_dsl!(statement), do: find_nested_dsl!(statement)
 
   defp find_nested_dsl!(ast) do
     Macro.prewalk(ast, fn
