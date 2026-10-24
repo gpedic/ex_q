@@ -291,6 +291,39 @@ defmodule QTest do
     refute Map.has_key?(output, :write)
   end
 
+  describe "let/4" do
+    test "stores the function's plain return value" do
+      result =
+        Q.new()
+        |> Q.put(:text, "hello")
+        |> Q.let(:upper, &String.upcase/1, [:text])
+        |> Q.let(:twice, {String, :duplicate, [2]}, [:text])
+        |> Q.let(:size, fn state -> map_size(state) end)
+        |> Q.exec()
+
+      assert {:ok, %{text: "hello", upper: "HELLO", twice: "hellohello", size: 3}} = result
+    end
+
+    test "a tuple return value is stored, not interpreted" do
+      assert {:ok, %{pair: {:error, :not_a_failure}}} =
+               Q.new()
+               |> Q.let(:pair, fn -> {:error, :not_a_failure} end)
+               |> Q.exec()
+    end
+
+    test "works in the DSL" do
+      result =
+        queue do
+          put(:text, "hello")
+          let(:upper, &String.upcase/1, [:text])
+          let(:keys, fn state -> Map.keys(state) |> Enum.sort() end)
+          exec()
+        end
+
+      assert {:ok, %{text: "hello", upper: "HELLO", keys: [:text, :upper]}} = result
+    end
+  end
+
   describe "to_list/1" do
     test "returns a list of operations" do
       que =

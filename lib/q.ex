@@ -30,7 +30,7 @@ defmodule Q do
       end
 
   Only the top-level statements of the block are treated as DSL calls (`put/2`,
-  `run/2`, `run/3`, `debug/0`, `debug/1` and `exec/0`); calls inside step
+  `run/2`, `run/3`, `let/2`, `let/3`, `debug/0`, `debug/1` and `exec/0`); calls inside step
   functions are left alone. Steps can't be added conditionally (inside `if`, `case`
   and the like) and `exec()` must be the last statement; both raise at compile time.
   Use the functional API to add steps conditionally.
@@ -45,11 +45,12 @@ defmodule Q do
   @type step_fun :: (... -> result)
   @type fun_mfa :: {module, atom, [any]} | {module, atom}
   @type params :: [name] | {[name], [order: :prepend | :append]}
-  @type kind :: :put | :run | :debug
+  @type kind :: :put | :run | :let | :debug
   @type exec_error :: {:error, name, any, state}
   @typep input :: :none | :state | {:keys, [name]}
   @typep call :: {:fun, function, input} | {:mfa, module, atom, [any], input, :prepend | :append}
-  @typep operation :: {:step, name, :put, any} | {:step, name, :run, call} | {:debug, Keyword.t()}
+  @typep operation ::
+           {:step, name, :put, any} | {:step, name, :run | :let, call} | {:debug, Keyword.t()}
 
   @doc """
   Creates and returns a new, empty `Q` struct.
@@ -218,6 +219,24 @@ defmodule Q do
   end
 
   @doc """
+  Adds a step whose function returns a plain value, for functions that can't fail.
+
+  The value is stored under `name` as is. `fun` and `params` work as in `run/4`. Use `run/4`
+  when the function returns `{:ok, value}` or `{:error, reason}`.
+
+  ## Example
+      iex> Q.new()
+      ...> |> Q.put(:text, "hello")
+      ...> |> Q.let(:upper, &String.upcase/1, [:text])
+      ...> |> Q.exec()
+      {:ok, %{text: "hello", upper: "HELLO"}}
+  """
+  @spec let(t, name, (... -> any) | fun_mfa, params) :: t
+  def let(%Q{} = queue, name, fun, params \\ []) do
+    add_op(queue, {:step, name, :let, build_call!(queue, fun, params)})
+  end
+
+  @doc """
   Provides a DSL for creating a queue using a more declarative syntax.
 
   Only top-level statements are DSL calls; see the module documentation for the limitations.
@@ -264,6 +283,18 @@ defmodule Q do
   defp transform_dsl({:run, _meta, [name, fun]}) do
     quote do
       queue = Q.run(queue, unquote(name), unquote(fun), [])
+    end
+  end
+
+  defp transform_dsl({:let, _meta, [name, fun, params]}) do
+    quote do
+      queue = Q.let(queue, unquote(name), unquote(fun), unquote(params))
+    end
+  end
+
+  defp transform_dsl({:let, _meta, [name, fun]}) do
+    quote do
+      queue = Q.let(queue, unquote(name), unquote(fun), [])
     end
   end
 
@@ -339,6 +370,8 @@ defmodule Q do
   defp dsl_call?({:put, _, [_, _]}), do: true
   defp dsl_call?({:run, _, [_, _]}), do: true
   defp dsl_call?({:run, _, [_, _, _]}), do: true
+  defp dsl_call?({:let, _, [_, _]}), do: true
+  defp dsl_call?({:let, _, [_, _, _]}), do: true
   defp dsl_call?({:debug, _, []}), do: true
   defp dsl_call?({:debug, _, [_]}), do: true
   defp dsl_call?(_), do: false
@@ -462,6 +495,10 @@ defmodule Q do
 
   defp run_op({:step, name, :put, value}, {:ok, state}) do
     {:cont, {:ok, Map.put(state, name, value)}}
+  end
+
+  defp run_op({:step, name, :let, call}, {:ok, state}) do
+    {:cont, {:ok, Map.put(state, name, call(call, state))}}
   end
 
   defp run_op({:step, name, :run, call}, {:ok, state}) do
