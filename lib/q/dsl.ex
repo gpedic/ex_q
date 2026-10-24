@@ -9,11 +9,12 @@ defmodule Q.DSL do
   # itself is left as written.
 
   @old_calls [:put, :run, :let, :inspect]
+  @conditionals [:if, :unless, :case, :cond]
 
   def compile(block, caller) do
     statements = statements(block)
     check_exec!(statements, caller)
-    {body, _bound} = compile_statements(statements, MapSet.new(), caller)
+    {body, _bound} = compile_statements(statements, [], caller)
 
     quote do
       queue = Q.new()
@@ -34,11 +35,11 @@ defmodule Q.DSL do
     end)
   end
 
-  # `bound` holds every step name visible to this block, to reject duplicates;
-  # `steps` holds the names bound earlier in this block, which become params.
+  # `bound` lists every step name visible to this block, to reject duplicates;
+  # `steps` lists the names bound earlier in this block, which become params.
   defp compile_statements(statements, bound, caller) do
     {body, {bound, _steps}} =
-      Enum.map_reduce(statements, {bound, MapSet.new()}, fn statement, {bound, steps} ->
+      Enum.map_reduce(statements, {bound, []}, fn statement, {bound, steps} ->
         compile_statement(statement, bound, steps, caller)
       end)
 
@@ -59,11 +60,11 @@ defmodule Q.DSL do
       unstored?(name) ->
         {ast, {bound, steps}}
 
-      MapSet.member?(bound, name) ->
+      name in bound ->
         compile_error!(caller, meta, "#{name} is already a step in this queue")
 
       true ->
-        {ast, {MapSet.put(bound, name), MapSet.put(steps, name)}}
+        {ast, {[name | bound], [name | steps]}}
     end
   end
 
@@ -85,6 +86,22 @@ defmodule Q.DSL do
       end
 
     {ast, {bound, steps}}
+  end
+
+  # A conditional runs as a merge: the branch taken builds the queue of its steps.
+  # Outer steps the conditional references become params of the merge function,
+  # so inside the branches they're plain variables.
+  defp compile_statement({kind, meta, args} = conditional, bound, steps, caller)
+       when kind in @conditionals and is_list(args) do
+    {branches, branch_names} = compile_branches(kind, args, bound, caller)
+    {fun, params} = step_fun(conditional, steps, {kind, meta, branches})
+
+    ast =
+      quote do
+        queue = Q.merge(queue, unquote(fun), unquote(params))
+      end
+
+    {ast, {branch_names ++ bound, steps}}
   end
 
   defp compile_statement({:exec, _meta, []}, bound, steps, _caller) do
@@ -128,13 +145,63 @@ defmodule Q.DSL do
     )
   end
 
-  # Wraps `expr` in a function of the earlier steps it references. The `_ = var`
-  # lines keep an argument from being reported as unused when every reference
-  # to it is shadowed inside `expr`, e.g. by a nested `fn` argument of the same name.
-  defp step_fun(expr, steps) do
+  defp compile_branches(kind, [condition, clauses], bound, caller) when kind in [:if, :unless] do
+    {do_branch, do_names} = compile_branch(Keyword.get(clauses, :do), bound, caller)
+    {else_branch, else_names} = compile_branch(Keyword.get(clauses, :else), bound, caller)
+    {[condition, [do: do_branch, else: else_branch]], Enum.uniq(do_names ++ else_names)}
+  end
+
+  defp compile_branches(:case, [expr, [do: clauses]], bound, caller) do
+    {clauses, names} = compile_clauses(clauses, bound, caller)
+    {[expr, [do: clauses]], names}
+  end
+
+  defp compile_branches(:cond, [[do: clauses]], bound, caller) do
+    {clauses, names} = compile_clauses(clauses, bound, caller)
+    {[[do: clauses]], names}
+  end
+
+  defp compile_clauses(clauses, bound, caller) do
+    {clauses, names} =
+      Enum.map_reduce(clauses, [], fn {:->, meta, [head, body]}, names ->
+        {branch, branch_names} = compile_branch(body, bound, caller)
+        {{:->, meta, [head, branch]}, branch_names ++ names}
+      end)
+
+    {clauses, Enum.uniq(names)}
+  end
+
+  # Returns code building the branch's queue, and the step names it binds. A
+  # missing branch (`if` without `else`) adds no steps.
+  defp compile_branch(nil, _bound, _caller), do: {quote(do: Q.new()), []}
+
+  defp compile_branch(block, bound, caller) do
+    statements = statements(block)
+
+    for {:exec, meta, []} <- statements do
+      compile_error!(caller, meta, "exec() can't be used inside a branch")
+    end
+
+    {body, branch_bound} = compile_statements(statements, bound, caller)
+
+    ast =
+      quote do
+        queue = Q.new()
+        unquote_splicing(body)
+        queue
+      end
+
+    {ast, branch_bound -- bound}
+  end
+
+  # Wraps `body` in a function of the earlier steps that `expr` references; `body`
+  # is `expr` unless it was compiled further. The `_ = var` lines keep an argument
+  # from being reported as unused when every reference to it is shadowed, e.g. by
+  # a nested `fn` argument of the same name.
+  defp step_fun(expr, steps, body \\ nil) do
     args = references(expr, steps)
     uses = Enum.map(args, &quote(do: _ = unquote(&1)))
-    fun = {:fn, [], [{:->, [], [args, {:__block__, [], uses ++ [expr]}]}]}
+    fun = {:fn, [], [{:->, [], [args, {:__block__, [], uses ++ [body || expr]}]}]}
     {fun, Enum.map(args, &elem(&1, 0))}
   end
 
@@ -146,7 +213,7 @@ defmodule Q.DSL do
           {nil, vars}
 
         {name, meta, context} = var, vars when is_atom(name) and is_atom(context) ->
-          if MapSet.member?(steps, name) do
+          if name in steps do
             {var, Map.put_new(vars, name, {name, Keyword.take(meta, [:counter]), context})}
           else
             {var, vars}

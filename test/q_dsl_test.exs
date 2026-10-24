@@ -214,7 +214,160 @@ defmodule Q.DSLTest do
     end
   end
 
+  describe "branching" do
+    defp checkout(total) do
+      queue do
+        amount = total
+
+        if amount > 100 do
+          discount = div(amount, 10)
+          final = amount - discount
+        else
+          shipping = 5
+        end
+
+        exec()
+      end
+    end
+
+    test "if/else picks the steps from a result" do
+      assert {:ok, %{amount: 120, discount: 12, final: 108} = state} = checkout(120)
+      refute Map.has_key?(state, :shipping)
+      assert {:ok, %{amount: 50, shipping: 5}} = checkout(50)
+    end
+
+    test "if without else, and unless" do
+      run = fn flag ->
+        queue do
+          on = flag
+          if on, do: yes = true
+          unless on, do: no = true
+          exec()
+        end
+      end
+
+      assert {:ok, %{on: true, yes: true} = state} = run.(true)
+      refute Map.has_key?(state, :no)
+      assert {:ok, %{on: false, no: true}} = run.(false)
+    end
+
+    test "case binds pattern variables for its branch" do
+      run = fn input ->
+        queue do
+          result = input
+
+          case result do
+            {:ok, n} -> doubled = n * 2
+            {:error, reason} -> failed = reason
+          end
+
+          exec()
+        end
+      end
+
+      assert {:ok, %{doubled: 10}} = run.({:ok, 5})
+      assert {:ok, %{failed: :nope}} = run.({:error, :nope})
+    end
+
+    test "cond and nested conditionals" do
+      run = fn n ->
+        queue do
+          number = n
+
+          cond do
+            number < 0 ->
+              sign = :negative
+
+            number < 10 ->
+              sign = :small
+              if number == 0, do: zero = true
+
+            true ->
+              sign = :large
+          end
+
+          exec()
+        end
+      end
+
+      assert {:ok, %{sign: :negative}} = run.(-1)
+      assert {:ok, %{sign: :small, zero: true}} = run.(0)
+      assert {:ok, %{sign: :large}} = run.(10)
+      assert {:ok, %{sign: :small} = state} = run.(1)
+      refute Map.has_key?(state, :zero)
+    end
+
+    test "a failing branch step names the step and keeps both states" do
+      result =
+        queue do
+          total = 120
+
+          if total > 100 do
+            request = {:approval, total}
+            approved <- {:error, :rejected}
+          end
+
+          charged <- raise("should not run")
+          exec()
+        end
+
+      assert {:error, :approved, :rejected, %{total: 120, request: {:approval, 120}}} = result
+    end
+
+    test "a halt in a branch halts the pipeline" do
+      result =
+        queue do
+          cached = true
+          if cached, do: hit <- {:halt, :cached}
+          computed <- raise("should not run")
+          exec()
+        end
+
+      assert {:ok, %{cached: true, hit: :cached}} = result
+    end
+
+    test "compiles to merge" do
+      q =
+        queue do
+          a = 1
+          if a > 0, do: b = 2
+        end
+
+      assert [let: :a, merge: nil] = Q.to_list(q)
+    end
+  end
+
   describe "compile errors" do
+    test "a branch step isn't a variable after the conditional" do
+      diagnostics =
+        capture_io(:stderr, fn ->
+          compile_error("""
+          queue do
+            a = 1
+            if a > 0, do: b = 2
+            c = b
+          end
+          """)
+        end)
+
+      assert diagnostics =~ ~s(undefined variable "b")
+    end
+
+    test "a branch rebinding an outer step" do
+      error = compile_error("queue do\n  a = 1\n  if a > 0, do: a = 2\nend")
+      assert error.description =~ "a is already a step in this queue"
+    end
+
+    test "rebinding a step bound in a branch" do
+      error = compile_error("queue do\n  a = 1\n  if a > 0, do: b = 2\n  b = 3\nend")
+      assert error.description =~ "b is already a step in this queue"
+    end
+
+    test "exec() inside a branch" do
+      error = compile_error("queue do\n  a = 1\n  if a > 0, do: exec()\nend")
+      assert error.description =~ "exec() can't be used inside a branch"
+    end
+
     test "a bare expression" do
       error = compile_error("queue do\n  a = 1\n  IO.puts(a)\nend")
       assert error.description =~ "expected a step such as `name = expr`"
