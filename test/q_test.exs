@@ -291,6 +291,47 @@ defmodule QTest do
     refute Map.has_key?(output, :write)
   end
 
+  describe "names starting with _" do
+    test "run but aren't stored, and can repeat" do
+      result =
+        Q.new()
+        |> Q.put(:a, 1)
+        |> Q.run(
+          :_,
+          fn a ->
+            send(self(), {:ran, a})
+            {:ok, :sent}
+          end,
+          [:a]
+        )
+        |> Q.let(:_, fn -> :ignored end)
+        |> Q.let(:_logged, fn -> :ignored end)
+        |> Q.exec()
+
+      assert {:ok, %{a: 1} = state} = result
+      assert map_size(state) == 1
+      assert_received {:ran, 1}
+    end
+
+    test "a failure still names the step" do
+      result =
+        Q.new()
+        |> Q.put(:a, 1)
+        |> Q.run(:_notified, fn -> {:error, :offline} end)
+        |> Q.exec()
+
+      assert {:error, :_notified, :offline, %{a: 1}} = result
+    end
+
+    test "can't be used as params" do
+      assert_raise ArgumentError, ~r/The parameter :_x does not exist/, fn ->
+        Q.new()
+        |> Q.let(:_x, fn -> 1 end)
+        |> Q.let(:y, & &1, [:_x])
+      end
+    end
+  end
+
   describe "let/4" do
     test "stores the function's plain return value" do
       result =

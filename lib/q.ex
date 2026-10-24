@@ -14,6 +14,9 @@ defmodule Q do
     * `merge/3` adds steps at run time, chosen from the results so far.
     * `debug/2` prints the state.
 
+  Steps named with an atom starting with `_`, such as `:_notified`, run but their result
+  isn't stored, and the name doesn't have to be unique. A failure still reports the name.
+
   A `run/4` function must return one of:
 
     * `{:ok, value}` - stores `value` under the step's name and continues
@@ -440,6 +443,16 @@ defmodule Q do
   defp dsl_call?(_), do: false
 
   defp add_op(%Q{} = queue, {:step, name, _kind, _} = op) do
+    if unstored?(name) do
+      %{queue | operations: [op | queue.operations]}
+    else
+      add_named_op(queue, name, op)
+    end
+  end
+
+  defp add_op(%Q{} = queue, op), do: %{queue | operations: [op | queue.operations]}
+
+  defp add_named_op(queue, name, op) do
     if MapSet.member?(queue.names, name) do
       raise ArgumentError, "#{Kernel.inspect(name)} is already a member of the Q"
     end
@@ -447,7 +460,7 @@ defmodule Q do
     %{queue | operations: [op | queue.operations], names: MapSet.put(queue.names, name)}
   end
 
-  defp add_op(%Q{} = queue, op), do: %{queue | operations: [op | queue.operations]}
+  defp unstored?(name), do: is_atom(name) and String.starts_with?(Atom.to_string(name), "_")
 
   # Resolves a step function and its params into a call, so that mistakes are
   # caught when the step is added rather than when the queue runs.
@@ -630,12 +643,17 @@ defmodule Q do
 
   # Names are unique within a queue, so a clash is only possible with a merged queue
   defp store!(state, name, value) do
-    if Map.has_key?(state, name) do
-      raise ArgumentError,
-            "step #{Kernel.inspect(name)} conflicts with a merged step of the same name"
-    end
+    cond do
+      unstored?(name) ->
+        state
 
-    Map.put(state, name, value)
+      Map.has_key?(state, name) ->
+        raise ArgumentError,
+              "step #{Kernel.inspect(name)} conflicts with a merged step of the same name"
+
+      true ->
+        Map.put(state, name, value)
+    end
   end
 
   defp merge_state!(state, merged) do
