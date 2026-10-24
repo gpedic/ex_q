@@ -8,7 +8,13 @@ defmodule Q do
 
   ## Steps
 
-  A step function must return one of:
+    * `put/3` stores a value.
+    * `run/4` runs a function that can fail.
+    * `let/4` runs a function that can't fail, and stores its return value as is.
+    * `merge/3` adds steps at run time, chosen from the results so far.
+    * `debug/2` prints the state.
+
+  A `run/4` function must return one of:
 
     * `{:ok, value}` - stores `value` under the step's name and continues
     * `{:error, reason}` - stops; `exec/1` returns `{:error, name, reason, state}`
@@ -16,6 +22,12 @@ defmodule Q do
     * `{:halt, value}` - stores `value` and stops; `exec/1` returns `{:ok, state}`
 
   Any other return value raises.
+
+  ## Function input
+
+  A step function receives the values of the keys listed in its `params`. Without
+  `params` it receives the whole state, or nothing if it is an anonymous function of
+  arity 0. See `run/4` for `{module, function, args}` functions.
 
   ## DSL
 
@@ -29,12 +41,11 @@ defmodule Q do
         exec()
       end
 
-  Only the top-level statements of the block are treated as DSL calls (`put/2`,
-  `run/2`, `run/3`, `let/2`, `let/3`, `merge/1`, `merge/2`, `debug/0`, `debug/1` and `exec/0`);
-  calls inside step
-  functions are left alone. Steps can't be added conditionally (inside `if`, `case`
-  and the like) and `exec()` must be the last statement; both raise at compile time.
-  Use the functional API to add steps conditionally.
+  Only the top-level statements of the block are treated as DSL calls (`put/2`, `run/2`,
+  `run/3`, `let/2`, `let/3`, `merge/1`, `merge/2`, `debug/0`, `debug/1` and `exec/0`);
+  calls inside step functions are left alone. Steps can't be added inside `if`, `case`
+  and the like, and `exec()` must be the last statement; both raise at compile time.
+  Use `merge/3` to choose steps based on earlier results.
   """
 
   alias __MODULE__

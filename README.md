@@ -94,7 +94,7 @@ end
 
 ## Parameter Passing
 
-Every step function will receive the entire pipeline state by default, or you can list which keys you want to pass as function arguments.
+Every step function will receive the entire pipeline state by default, or you can list which keys you want to pass as function arguments. An anonymous function of arity 0 without params receives nothing. The function's arity is checked when the step is added, so a mismatch raises right away instead of when the pipeline runs.
 
 ```elixir
 defmodule ParamDemo do
@@ -115,6 +115,13 @@ defmodule ParamDemo do
 
       # Pass a multiple arguments from the state
       run(:multi_arg, &MyModule.process_multiple/2, [:custom_extract, :some_data])
+
+      # Use let for functions that can't fail: the return value is stored as is,
+      # without wrapping it in {:ok, value}
+      let(:normalized, &String.trim/1, [:some_data])
+
+      # Pass nothing
+      let(:started_at, fn -> DateTime.utc_now() end)
 
       # The mfa version allows us to pass additional params directly
       # by default args will be prepended i.e.
@@ -159,6 +166,7 @@ Sometimes you don’t need the remaining steps once a certain condition is met. 
           exec()
         end
       end
+    end
 
   # halt early on cache hit
   {:ok, %{
@@ -174,6 +182,30 @@ Sometimes you don’t need the remaining steps once a certain condition is met. 
         cache: :ok
       }
 ```
+
+## Branching with merge
+
+Steps can't be wrapped in `if` or `case`, because the queue is built before any step runs. To choose steps based on a result, use `merge`: its function is called with earlier results, like a step function, and returns a queue whose steps run next.
+
+```elixir
+queue do
+  put(:order, order)
+  run(:total, &Orders.total/1, [:order])
+
+  merge(fn total ->
+    if total > 100 do
+      Q.new() |> Q.run(:approval, fn -> Approvals.request(order) end)
+    else
+      Q.new()
+    end
+  end, [:total])
+
+  run(:charged, &Payments.charge/1, [:order])
+  exec()
+end
+```
+
+The merged queue runs with its own state, so pass values into it with a closure, as with `order` above. Its results are added to the pipeline's state, and an error or halt in it stops the whole pipeline like any other step.
 
 ## API
 
@@ -243,7 +275,7 @@ Q.new()
 ### DSL limitations
 
 * Only the top-level statements of a `queue` block are DSL calls. Calls inside step functions are left alone, so a local `put/2` inside a `fn` behaves as usual.
-* Steps can't be added conditionally: a `put`, `run`, `debug` or `exec` inside `if`, `case` or another expression raises at compile time. Build the queue with the functional API when steps depend on runtime conditions.
+* Steps can't be added conditionally: a `put`, `run`, `let`, `merge`, `debug` or `exec` inside `if`, `case` or another expression raises at compile time. Use [`merge`](#branching-with-merge) to choose steps based on earlier results.
 * `exec()` must be the last statement in the block.
 
 ## Installation
