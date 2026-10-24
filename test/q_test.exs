@@ -70,7 +70,7 @@ defmodule QTest do
 
   describe "exec/1" do
     test "executing without queued tasks returns nil" do
-      assert {:ok, nil} = Q.new() |> Q.exec()
+      assert {:ok, %{}} = Q.new() |> Q.exec()
     end
 
     test "raises for unexpected returns" do
@@ -79,7 +79,7 @@ defmodule QTest do
         |> Q.run(:bad_return, fn _ -> {:bad, 1} end)
 
       assert_raise RuntimeError,
-                   ~r/^expected operation `:bad_return` to return {:ok, value}, {:halt, value} or {:error, value}, got: {:bad, 1}$/,
+                   ~r/^expected operation `:bad_return` to return {:ok, value}, {:halt, value}, {:error, value} or :error, got: {:bad, 1}$/,
                    fn ->
                      Q.exec(q)
                    end
@@ -98,14 +98,14 @@ defmodule QTest do
     end
 
     test "repeating an operation" do
-      assert_raise RuntimeError, ~r":test is already a member", fn ->
+      assert_raise ArgumentError, ~r":test is already a member", fn ->
         Q.new() |> Q.put(:test, :test) |> Q.put(:test, :fails)
       end
     end
 
     test "the duplicate name error does not leak stored values" do
       error =
-        assert_raise RuntimeError, fn ->
+        assert_raise ArgumentError, fn ->
           Q.new() |> Q.put(:password, "hunter2") |> Q.put(:password, "x")
         end
 
@@ -188,7 +188,7 @@ defmodule QTest do
     end
 
     test "it should fail to run an operation with invalid params" do
-      assert_raise RuntimeError, ~r"The parameter :foo does not exist in the queue.", fn ->
+      assert_raise ArgumentError, ~r"The parameter :foo does not exist in the queue.", fn ->
         Q.new()
         |> Q.run(:read, fn _ -> {:ok, "hello world"} end)
         |> Q.run(:write, fn _ -> {:error, :invalid_params} end, [:foo])
@@ -243,6 +243,17 @@ defmodule QTest do
       |> Q.exec()
 
     assert {:error, :write, :write_failed, %{init: :test, read: :read}} = result
+  end
+
+  test "a bare :error return is a failure" do
+    result =
+      Q.new()
+      |> Q.put(:input, "not base64")
+      |> Q.run(:decoded, &Base.decode64/1, [:input])
+      |> Q.run(:never, fn _ -> {:ok, :should_not_run} end)
+      |> Q.exec()
+
+    assert {:error, :decoded, :error, %{input: "not base64"}} = result
   end
 
   test "handles halt" do
@@ -309,14 +320,14 @@ defmodule QTest do
     test "duplicating an operation will raise and error" do
       fun = fn _, _ -> {:ok, :ok} end
 
-      assert_raise RuntimeError, ~r":run is already a member", fn ->
+      assert_raise ArgumentError, ~r":run is already a member", fn ->
         Q.new() |> Q.run(:run, fun) |> Q.run(:run, fun)
       end
     end
 
     test "returning invalid return value will raise and error" do
       assert_raise RuntimeError,
-                   ~r/^expected operation `:bad_return` to return {:ok, value}, {:halt, value} or {:error, value}, got: {:invalid, 1}$/,
+                   ~r/^expected operation `:bad_return` to return {:ok, value}, {:halt, value}, {:error, value} or :error, got: {:invalid, 1}$/,
                    fn ->
                      Q.new()
                      |> Q.run(:bad_return, fn _ -> {:invalid, 1} end)
@@ -324,7 +335,7 @@ defmodule QTest do
                    end
 
       assert_raise RuntimeError,
-                   ~r"expected operation `:empty` to return {:ok, value}, {:halt, value} or {:error, value}, got: nil",
+                   ~r"expected operation `:empty` to return {:ok, value}, {:halt, value}, {:error, value} or :error, got: nil",
                    fn ->
                      Q.new()
                      |> Q.run(:empty, fn _ -> nil end)
@@ -468,8 +479,8 @@ defmodule QTest do
         queue do
         end
 
-      assert {:ok, nil} = Q.exec(empty)
-      assert {:ok, nil} = queue(do: nil) |> Q.exec()
+      assert {:ok, %{}} = Q.exec(empty)
+      assert {:ok, %{}} = queue(do: nil) |> Q.exec()
     end
 
     test "a caller variable named queue is not shadowed" do

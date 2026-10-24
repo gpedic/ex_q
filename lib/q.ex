@@ -12,6 +12,7 @@ defmodule Q do
 
     * `{:ok, value}` - stores `value` under the step's name and continues
     * `{:error, reason}` - stops; `exec/1` returns `{:error, name, reason, state}`
+    * `:error` - same as `{:error, :error}`, for functions such as `Base.decode64/1`
     * `{:halt, value}` - stores `value` and stops; `exec/1` returns `{:ok, state}`
 
   Any other return value raises.
@@ -39,7 +40,7 @@ defmodule Q do
   defstruct operations: [], names: MapSet.new()
   @type t :: %__MODULE__{operations: operations, names: names}
   @type state :: map
-  @type result :: {:ok, any} | {:error, any} | {:halt, any}
+  @type result :: {:ok, any} | {:error, any} | :error | {:halt, any}
   @type fun_arity1 :: (state -> result)
   @type step_fun :: (... -> result)
   @type fun_mfa :: {module, atom, [any]} | {module, atom}
@@ -83,7 +84,7 @@ defmodule Q do
 
   ## Errors
 
-  This function will raise an error if `name` is already present in the queue.
+  Raises `ArgumentError` if `name` is already present in the queue.
 
   ## Example
       iex> Q.new()
@@ -372,7 +373,7 @@ defmodule Q do
     check_params_existence(names, param_names(params))
 
     if MapSet.member?(names, name) do
-      raise "#{Kernel.inspect(name)} is already a member of the Q"
+      raise ArgumentError, "#{Kernel.inspect(name)} is already a member of the Q"
     else
       %{queue | operations: [{name, operation} | operations], names: MapSet.put(names, name)}
     end
@@ -395,8 +396,6 @@ defmodule Q do
     raise ArgumentError,
           "expected params to be a list of names or a {names, opts} tuple, got: #{Kernel.inspect(params)}"
   end
-
-  defp apply_operations([]), do: {:ok, nil}
 
   defp apply_operations(operations) do
     Enum.reduce_while(operations, {:ok, %{}}, &apply_operation/2)
@@ -425,8 +424,11 @@ defmodule Q do
       {:error, value} ->
         {:halt, {:error, name, value, acc}}
 
+      :error ->
+        {:halt, {:error, name, :error, acc}}
+
       other ->
-        raise "expected operation `#{Kernel.inspect(name)}` to return {:ok, value}, {:halt, value} or {:error, value}, got: #{Kernel.inspect(other)}"
+        raise "expected operation `#{Kernel.inspect(name)}` to return {:ok, value}, {:halt, value}, {:error, value} or :error, got: #{Kernel.inspect(other)}"
     end
   end
 
@@ -473,7 +475,7 @@ defmodule Q do
   defp check_params_existence(names, params) do
     for param <- params do
       unless MapSet.member?(names, param) do
-        raise "The parameter #{Kernel.inspect(param)} does not exist in the queue."
+        raise ArgumentError, "The parameter #{Kernel.inspect(param)} does not exist in the queue."
       end
     end
 
