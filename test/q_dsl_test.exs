@@ -46,7 +46,7 @@ defmodule Q.DSLTest do
           value = 1
         end
 
-      assert [let: :value] = Q.to_list(q)
+      assert [let: :value] = Q.__to_list__(q)
       assert {:ok, %{value: 1}} = execute(q)
     end
 
@@ -104,7 +104,7 @@ defmodule Q.DSLTest do
           decoded <- Base.decode64(input)
         end
 
-      assert [let: :input, run: :decoded] = Q.to_list(q)
+      assert [let: :input, run: :decoded] = Q.__to_list__(q)
     end
 
     test "an empty block builds an empty queue" do
@@ -393,7 +393,7 @@ defmodule Q.DSLTest do
 
       assert output == "selected: %{a: 1}\n"
       assert Q.operations(queue) == [:selected, :a]
-      assert Q.to_list(queue) == [let: :selected, let: :a, debug: nil]
+      assert Q.__to_list__(queue) == [let: :selected, let: :a, debug: nil]
     end
 
     test "options are evaluated once per execution, and never while building" do
@@ -605,7 +605,7 @@ defmodule Q.DSLTest do
           if a > 0, do: b = 2
         end
 
-      assert [let: :a, branch: nil] = Q.to_list(q)
+      assert [let: :a, branch: nil] = Q.__to_list__(q)
     end
   end
 

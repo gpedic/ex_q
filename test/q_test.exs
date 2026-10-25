@@ -151,7 +151,7 @@ defmodule QTest do
         Q.new()
         |> Q.put(:init, :test)
 
-      assert [{:put, :init}] = Q.to_list(q)
+      assert [{:put, :init}] = Q.__to_list__(q)
       assert {:ok, %{init: :test}} = Q.execute(q)
     end
 
@@ -510,7 +510,7 @@ defmodule QTest do
                {:ok, %{{:input, 7} => 2, {:double, 7} => 4, :summary => "4"}}
 
       assert Q.operations(queue) == [{:input, 7}, {:double, 7}, :summary]
-      assert Q.to_list(queue) == [put: {:input, 7}, run: {:double, 7}, let: :summary]
+      assert Q.__to_list__(queue) == [put: {:input, 7}, run: {:double, 7}, let: :summary]
 
       assert_raise ArgumentError, ~r/is already a member/, fn ->
         Q.run(queue, {:input, 7}, fn -> {:ok, :duplicate} end, [])
@@ -608,7 +608,7 @@ defmodule QTest do
 
       assert Q.execute(queue) == {:ok, %{_x: 1, y: 1}}
       assert Q.operations(queue) == [:_x, :y]
-      assert Q.to_list(queue) == [let: :_x, let: :y]
+      assert Q.__to_list__(queue) == [let: :_x, let: :y]
     end
   end
 
@@ -677,8 +677,8 @@ defmodule QTest do
                |> Q.let(:b, fn -> billing(%{id: 1}) end, [])
                |> Q.execute()
 
-      assert [put: :validated, let: :invoice] = Q.to_list(a)
-      assert [put: :validated, let: :invoice] = Q.to_list(b)
+      assert [put: :validated, let: :invoice] = Q.__to_list__(a)
+      assert [put: :validated, let: :invoice] = Q.__to_list__(b)
     end
 
     test "a failing child step fails the parent step with the child's error tuple" do
@@ -850,7 +850,8 @@ defmodule QTest do
     end
 
     test "is listed as a run step" do
-      assert [run: :billing] = Q.new() |> Q.run(:billing, fn -> Q.new() end, []) |> Q.to_list()
+      assert [run: :billing] =
+               Q.new() |> Q.run(:billing, fn -> Q.new() end, []) |> Q.__to_list__()
     end
   end
 
@@ -890,7 +891,7 @@ defmodule QTest do
     end
   end
 
-  describe "to_list/1" do
+  describe "__to_list__/1" do
     test "returns a list of operations" do
       que =
         Q.new()
@@ -898,7 +899,7 @@ defmodule QTest do
         |> Q.run(:read, fn _ -> {:ok, :read} end)
         |> Q.run(:write, fn %{read: _read} -> {:ok, :write} end)
 
-      assert [put: :init, run: :read, run: :write] = Q.to_list(que)
+      assert [put: :init, run: :read, run: :write] = Q.__to_list__(que)
     end
   end
 
@@ -995,7 +996,7 @@ defmodule QTest do
         |> Q.debug()
 
       assert [:a, :b] = Q.operations(q)
-      assert [put: :a, debug: nil, put: :b, debug: nil] = Q.to_list(q)
+      assert [put: :a, debug: nil, put: :b, debug: nil] = Q.__to_list__(q)
     end
   end
 

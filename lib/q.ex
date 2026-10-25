@@ -119,7 +119,7 @@ defmodule Q do
   @type step_fun :: (... -> result)
   @type fun_mfa :: {module, atom, [any]} | {module, atom}
   @type params :: [name] | {[name], [order: :prepend | :append]}
-  @type kind :: :put | :run | :let | :branch | :debug
+  @typep kind :: :put | :run | :let | :branch | :debug
   @type error :: {:error, name, any, state}
   @typep input :: :none | :state | {:keys, [name]}
   @typep call :: {:fun, function, input} | {:mfa, module, atom, [any], input, :prepend | :append}
@@ -137,7 +137,7 @@ defmodule Q do
   such as `put/3` and `run/4`.
 
   ## Example
-      iex> Q.new() |> Q.to_list()
+      iex> Q.new() |> Q.operations()
       []
   """
   @doc group: "Functional API"
@@ -175,23 +175,12 @@ defmodule Q do
     add_op(queue, {:step, name, :put, value})
   end
 
-  @doc """
-  Lists the queue's operations in the order they were added, as `{kind, name}` tuples.
-
-  `kind` is the function that added the operation; `name` is `nil` for `debug/2` and for a
-  conditional in a `queue/1` block (`:branch`).
-
-  ## Example
-      iex> Q.new()
-      ...> |> Q.put(:a, 1)
-      ...> |> Q.debug()
-      ...> |> Q.run(:b, fn _ -> {:ok, 2} end)
-      ...> |> Q.to_list()
-      [{:put, :a}, {:debug, nil}, {:run, :b}]
-  """
-  @doc group: "Inspecting a queue"
-  @spec to_list(t) :: [{kind, name | nil}]
-  def to_list(%Q{operations: operations}) do
+  # Lists the queue's operations in order as `{kind, name}` tuples, with `name` nil for
+  # branches and debug calls. Internal: used by the tests to check what a queue block
+  # compiles to. Users get step names from operations/1.
+  @doc false
+  @spec __to_list__(t) :: [{kind, name | nil}]
+  def __to_list__(%Q{operations: operations}) do
     operations
     |> Enum.reverse()
     |> Enum.map(fn
