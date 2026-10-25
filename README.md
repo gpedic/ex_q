@@ -28,7 +28,7 @@ defmodule UploadProcessor do
       validated <- validate_rows(parsed)
       enriched <- DataProcessor.enrich_data(validated, use_ai: true)
     end
-    |> exec()
+    |> execute()
   end
 
   defp validate_rows(rows) do
@@ -56,7 +56,7 @@ def process_data(data) do
     validated <- validate_schema(decoded)
     normalized <- normalize_data(validated)
     enriched <- add_metadata(normalized)
-    exec()
+    execute()
   end
 end
 
@@ -111,7 +111,7 @@ end
 
 A step's inputs are the earlier steps its expression uses: `decoded <- Base.decode64(trimmed)` depends on `trimmed`. Other variables, such as function arguments, are captured as in any closure. Steps run in order when the queue is executed, and each result is stored under the step's name.
 
-The block returns the queue. Run it with `exec()` as the last statement, or by piping it into `exec/1`.
+The block returns the queue. Run it with `execute()` as the last statement, or by piping it into `execute/1`.
 
 ## Halting execution early
 
@@ -124,7 +124,7 @@ def process_data(input) do
     cached <- check_cache(request.key)
     processed <- expensive_operation(request)
     _ <- store_in_cache(request.key, processed)
-    exec()
+    execute()
   end
 end
 
@@ -157,7 +157,7 @@ queue do
   end
 
   charged <- Payments.charge(order)
-  exec()
+  execute()
 end
 ```
 
@@ -187,7 +187,7 @@ queue do
   billing <- billing_steps(user)
   shipping <- shipping_steps(user)
   confirmation <- confirm(billing.invoice, shipping.tracking)
-  exec()
+  execute()
 end
 
 # {:ok, %{
@@ -217,7 +217,7 @@ queue do
   a = 1
   b = 2
   debug(only: :a)
-  exec()
+  execute()
 end
 
 # Prints:
@@ -226,7 +226,7 @@ end
 
 ## Rules
 
-* Every statement in a `queue` block is a step (`name = expr` or `name <- expr`), `debug()`, a conditional containing steps, or `exec()` as the last statement. Use `_ = expr` to run an expression without storing its result.
+* Every statement in a `queue` block is a step (`name = expr` or `name <- expr`), `debug()`, a conditional containing steps, or `execute()` as the last statement. Use `_ = expr` to run an expression without storing its result.
 * The left side of a step is a single variable, and each name is bound once. Names starting with `_` aren't stored and can repeat.
 * Mistakes are compile errors pointing at the line.
 
@@ -239,7 +239,7 @@ users
 |> Enum.reduce(Q.new(), fn user, q ->
   Q.run(q, {:invite, user.id}, fn -> Mailer.invite(user) end)
 end)
-|> Q.exec()
+|> Q.execute()
 ```
 
 Here a step's inputs are listed explicitly: `decoded <- Base.decode64(trimmed)` in a `queue` block is `Q.run(q, :decoded, &Base.decode64/1, [:trimmed])`, and `billing <- billing_steps(user)` is `Q.run(q, :billing, &billing_steps/1, [:user])`. See the [documentation](https://hexdocs.pm/ex_q/Q.html) for `put/3`, `run/4`, `let/4` and `debug/2`.
@@ -254,7 +254,7 @@ Q.new()
 |> Q.put(:file, data)
 |> parse()
 |> validate()
-|> Q.exec()
+|> Q.execute()
 ```
 
 ## Installation

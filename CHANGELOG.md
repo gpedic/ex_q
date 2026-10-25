@@ -11,7 +11,7 @@ queue do
   input = data
   decoded <- Base.decode64(input)
   upper = String.upcase(decoded)
-  exec()
+  execute()
 end
 ```
 
@@ -24,7 +24,7 @@ The 1.x syntax is removed, and its calls inside a `queue` block are a compile er
 | `run(:valid, fn %{decoded: d} -> validate(d) end)` | `valid <- validate(decoded)` |
 | `run(:cs, {Mod, :changeset, [%S{}]}, {[:a, :b], order: :append})` | `cs <- Mod.changeset(%S{}, a, b)` |
 | `inspect()` / `inspect(only: :a)` | `debug()` / `debug(only: :a)` |
-| `exec()` | `exec()` (unchanged) |
+| `exec()` | `execute()` (`exec()` is deprecated) |
 
 Also new in the block:
 
@@ -39,6 +39,8 @@ Also new in the block:
 
 New:
 
+- **`execute/1`** replaces `exec/1`, which remains available as a deprecated alias. In a `queue` block, use terminal `execute()`; terminal `exec()` still works but emits a compile warning.
+
 - **`let/4`**: a step for functions that can't fail. The return value is stored as is, so `let(:upper, &String.upcase/1, [:text])` needs no `{:ok, _}` wrapping.
 - **Child queues**: a `run/4` function may return a queue, which runs as a child with its result map stored under the step's name. A failing child step is reported as `{:error, step, {:error, child_step, reason, child_state}, state}`. A child's halt stops the parent too, unless it is `{:halt, value, propagate: false}`.
 - **Arity-0 steps**: an anonymous function of arity 0 without params is called with no arguments.
@@ -50,7 +52,7 @@ Breaking:
 - **`Q.inspect/2` is renamed to `Q.debug/2`.** The old name clashed with `Kernel.inspect/2` in any module that did `import Q`.
 - **`run/6` is removed.**
   - Upgrade: `run(q, name, mod, fun, args, params)` becomes `run(q, name, {mod, fun, args}, params)`.
-- **`exec/1` on an empty queue returns `{:ok, %{}}`** instead of `{:ok, nil}`.
+- **`execute/1` (and deprecated `exec/1`) on an empty queue returns `{:ok, %{}}`** instead of `{:ok, nil}`.
 - **A step returning a bare `:error` fails the pipeline** with `{:error, step, :error, state}`. It used to raise.
   - Upgrade: code that rescued the `RuntimeError` for such steps should match the error tuple instead.
 - **Build-time mistakes raise `ArgumentError`** instead of `RuntimeError`: a duplicate step name, or a param that refers to a step that doesn't exist.

@@ -33,9 +33,9 @@ defmodule QTest do
     end
   end
 
-  describe "exec/1" do
-    test "executing without queued tasks returns nil" do
-      assert {:ok, %{}} = Q.new() |> Q.exec()
+  describe "execute/1" do
+    test "executing without queued tasks returns an empty state" do
+      assert {:ok, %{}} = Q.new() |> Q.execute()
     end
 
     test "raises for unexpected returns" do
@@ -46,8 +46,25 @@ defmodule QTest do
       assert_raise RuntimeError,
                    ~r/^expected operation `:bad_return` to return {:ok, value}, {:halt, value}, {:halt, value, propagate: boolean}, {:error, value}, :error or a queue, got: {:bad, 1}$/,
                    fn ->
-                     Q.exec(q)
+                     Q.execute(q)
                    end
+    end
+  end
+
+  describe "deprecated exec/1" do
+    test "preserves execution results" do
+      legacy_execute = Function.capture(Q, :exec, 1)
+
+      queues = [
+        Q.new(),
+        Q.new() |> Q.put(:value, 1),
+        Q.new() |> Q.run(:failed, fn -> {:error, :offline} end),
+        Q.new() |> Q.run(:stopped, fn -> {:halt, :done} end)
+      ]
+
+      for queue <- queues do
+        assert legacy_execute.(queue) == Q.execute(queue)
+      end
     end
   end
 
@@ -58,7 +75,7 @@ defmodule QTest do
         |> Q.put(:init, :test)
 
       assert [{:put, :init}] = Q.to_list(q)
-      assert {:ok, %{init: :test}} = Q.exec(q)
+      assert {:ok, %{init: :test}} = Q.execute(q)
     end
 
     test "repeating an operation" do
@@ -84,7 +101,7 @@ defmodule QTest do
         |> Q.put(:init, :test)
         |> Q.run(:read, fn _ -> {:ok, "hello world"} end)
         |> Q.run(:write, {TestWriter, :write, [[upcase: true]]})
-        |> Q.exec()
+        |> Q.execute()
 
       assert {:ok, %{init: :test, read: "hello world", write: "HELLO WORLD"}} = result
     end
@@ -93,7 +110,7 @@ defmodule QTest do
       assert {:ok, %{answer: 42}} =
                Q.new()
                |> Q.run(:answer, fn -> {:ok, 42} end)
-               |> Q.exec()
+               |> Q.execute()
     end
 
     test "a function whose arity doesn't match its params raises when added" do
@@ -123,7 +140,7 @@ defmodule QTest do
         |> Q.run(:write1, fn text -> TestWriter.write(text, upcase: true) end, [:read])
         |> Q.run(:write2, {TestWriter, :write, [[upcase: true]]}, {[:read], order: :prepend})
         |> Q.run(:write3, &TestWriter.write/1, [:read])
-        |> Q.exec()
+        |> Q.execute()
 
       assert {:ok,
               %{
@@ -139,7 +156,7 @@ defmodule QTest do
         Q.new()
         |> Q.put(:init, "hello world")
         |> Q.run(:write, {TestWriter, :write}, [:init])
-        |> Q.exec()
+        |> Q.execute()
 
       assert {:ok,
               %{
@@ -155,7 +172,7 @@ defmodule QTest do
         |> Q.run(:write, fn text -> {:ok, text} end, [:read2])
         |> Q.run(:write2, {TestWriter, :write, [[upcase: true]]}, {[:read2], order: :prepend})
         |> Q.run(:write3, &TestWriter.write/1, [:read2])
-        |> Q.exec()
+        |> Q.execute()
 
       assert {:ok,
               %{
@@ -171,7 +188,7 @@ defmodule QTest do
         Q.new()
         |> Q.run(:read, fn _ -> {:ok, "hello world"} end)
         |> Q.run(:write, fn _ -> {:error, :invalid_params} end, [:foo])
-        |> Q.exec()
+        |> Q.execute()
       end
     end
 
@@ -180,7 +197,7 @@ defmodule QTest do
         Q.new()
         |> Q.put(:a, 1)
         |> Q.run(:b, fn a -> {:ok, a * 2} end, {[:a], order: :append})
-        |> Q.exec()
+        |> Q.execute()
 
       assert {:ok, %{a: 1, b: 2}} = result
     end
@@ -218,7 +235,7 @@ defmodule QTest do
       |> Q.put(:init, :test)
       |> Q.run(:read, fn _ -> {:ok, :read} end)
       |> Q.run(:write, fn %{read: _read} -> {:ok, :write} end)
-      |> Q.exec()
+      |> Q.execute()
 
     assert {:ok, %{init: :test, read: :read, write: :write}} = result
   end
@@ -229,7 +246,7 @@ defmodule QTest do
       |> Q.put(:init, :test)
       |> Q.run(:read, fn _ -> {:ok, :read} end)
       |> Q.run(:write, fn %{read: _read} -> {:error, :write_failed} end)
-      |> Q.exec()
+      |> Q.execute()
 
     assert {:error, :write, :write_failed, %{init: :test, read: :read}} = result
   end
@@ -240,7 +257,7 @@ defmodule QTest do
       |> Q.put(:input, "not base64")
       |> Q.run(:decoded, &Base.decode64/1, [:input])
       |> Q.run(:never, fn _ -> {:ok, :should_not_run} end)
-      |> Q.exec()
+      |> Q.execute()
 
     assert {:error, :decoded, :error, %{input: "not base64"}} = result
   end
@@ -250,7 +267,7 @@ defmodule QTest do
       Q.new()
       |> Q.run(:read, fn _ -> {:halt, :done_early} end)
       |> Q.run(:write, fn %{read: _read} -> {:ok, :write_success} end)
-      |> Q.exec()
+      |> Q.execute()
 
     assert {:ok, %{read: :done_early} = output} = result
     refute Map.has_key?(output, :write)
@@ -271,7 +288,7 @@ defmodule QTest do
         )
         |> Q.let(:_, fn -> :ignored end)
         |> Q.let(:_logged, fn -> :ignored end)
-        |> Q.exec()
+        |> Q.execute()
 
       assert {:ok, %{a: 1} = state} = result
       assert map_size(state) == 1
@@ -283,7 +300,7 @@ defmodule QTest do
         Q.new()
         |> Q.put(:a, 1)
         |> Q.run(:_notified, fn -> {:error, :offline} end)
-        |> Q.exec()
+        |> Q.execute()
 
       assert {:error, :_notified, :offline, %{a: 1}} = result
     end
@@ -305,7 +322,7 @@ defmodule QTest do
         |> Q.let(:upper, &String.upcase/1, [:text])
         |> Q.let(:twice, {String, :duplicate, [2]}, [:text])
         |> Q.let(:size, fn state -> map_size(state) end)
-        |> Q.exec()
+        |> Q.execute()
 
       assert {:ok, %{text: "hello", upper: "HELLO", twice: "hellohello", size: 3}} = result
     end
@@ -314,7 +331,7 @@ defmodule QTest do
       assert {:ok, %{pair: {:error, :not_a_failure}}} =
                Q.new()
                |> Q.let(:pair, fn -> {:error, :not_a_failure} end)
-               |> Q.exec()
+               |> Q.execute()
     end
   end
 
@@ -338,7 +355,7 @@ defmodule QTest do
         |> Q.run(:billing, &billing/1, [:user])
         |> Q.run(:shipping, &shipping/1, [:user])
         |> Q.let(:confirmation, fn b, s -> {b.invoice, s.tracking} end, [:billing, :shipping])
-        |> Q.exec()
+        |> Q.execute()
 
       assert result ==
                {:ok,
@@ -351,7 +368,7 @@ defmodule QTest do
     end
 
     test "an empty child stores an empty map" do
-      assert Q.new() |> Q.run(:child, fn -> Q.new() end) |> Q.exec() == {:ok, %{child: %{}}}
+      assert Q.new() |> Q.run(:child, fn -> Q.new() end) |> Q.execute() == {:ok, %{child: %{}}}
     end
 
     test "{:ok, queue} and let store a queue without running it" do
@@ -359,7 +376,7 @@ defmodule QTest do
                Q.new()
                |> Q.run(:a, fn -> {:ok, billing(%{id: 1})} end)
                |> Q.let(:b, fn -> billing(%{id: 1}) end)
-               |> Q.exec()
+               |> Q.execute()
 
       assert [put: :validated, let: :invoice] = Q.to_list(a)
       assert [put: :validated, let: :invoice] = Q.to_list(b)
@@ -375,7 +392,7 @@ defmodule QTest do
           |> Q.run(:charge, fn -> {:error, :declined} end)
         end)
         |> Q.run(:never, fn -> {:ok, :should_not_run} end)
-        |> Q.exec()
+        |> Q.execute()
 
       assert result ==
                {:error, :billing, {:error, :charge, :declined, %{validated: true}},
@@ -394,7 +411,7 @@ defmodule QTest do
             |> Q.run(:inner, fn -> {:error, :deep} end)
           end)
         end)
-        |> Q.exec()
+        |> Q.execute()
 
       assert result ==
                {:error, :outer, {:error, :middle, {:error, :inner, :deep, %{b: 2}}, %{a: 1}}, %{}}
@@ -416,7 +433,7 @@ defmodule QTest do
           |> Q.put(:never, :outer)
         end)
         |> Q.put(:never, :top)
-        |> Q.exec()
+        |> Q.execute()
 
       assert result == {:ok, %{top: 0, outer: %{a: 1, middle: %{b: 2, stop: :early}}}}
     end
@@ -430,27 +447,54 @@ defmodule QTest do
           |> Q.put(:never, true)
         end)
         |> Q.put(:after_cache, true)
-        |> Q.exec()
+        |> Q.execute()
 
       assert result == {:ok, %{cache: %{lookup: :hit}, after_cache: true}}
+    end
+
+    test "a local halt in a grandchild allows both ancestors to continue" do
+      result =
+        Q.new()
+        |> Q.run(:child, fn ->
+          Q.new()
+          |> Q.run(:grandchild, fn ->
+            Q.new()
+            |> Q.put(:before_halt, true)
+            |> Q.run(:stop, fn -> {:halt, :done, propagate: false} end)
+            |> Q.let(:never, fn -> raise "grandchild must stop" end)
+          end)
+          |> Q.put(:after_grandchild, true)
+        end)
+        |> Q.put(:after_child, true)
+        |> Q.execute()
+
+      assert result ==
+               {:ok,
+                %{
+                  child: %{
+                    grandchild: %{before_halt: true, stop: :done},
+                    after_grandchild: true
+                  },
+                  after_child: true
+                }}
     end
 
     test "propagate: true is a plain halt, and both forms are the same at the top level" do
       child = fn -> Q.new() |> Q.run(:stop, fn -> {:halt, :early, propagate: true} end) end
 
-      assert Q.new() |> Q.run(:child, child) |> Q.put(:never, true) |> Q.exec() ==
+      assert Q.new() |> Q.run(:child, child) |> Q.put(:never, true) |> Q.execute() ==
                {:ok, %{child: %{stop: :early}}}
 
       local = fn -> {:halt, :early, propagate: false} end
 
-      assert Q.new() |> Q.run(:stop, local) |> Q.put(:never, true) |> Q.exec() ==
+      assert Q.new() |> Q.run(:stop, local) |> Q.put(:never, true) |> Q.execute() ==
                {:ok, %{stop: :early}}
     end
 
     test "other third elements of a halt are invalid returns" do
       for bad <- [{:halt, 1, :bogus}, {:halt, 1, other: true}, {:halt, 1, propagate: :yes}] do
         assert_raise RuntimeError, ~r/expected operation `:step` to return/, fn ->
-          Q.new() |> Q.run(:step, fn -> bad end) |> Q.exec()
+          Q.new() |> Q.run(:step, fn -> bad end) |> Q.execute()
         end
       end
     end
@@ -459,14 +503,14 @@ defmodule QTest do
       result =
         Q.new()
         |> Q.run(:_, fn -> Q.new() |> Q.let(:_, fn -> send(self(), :child_ran) end) end)
-        |> Q.exec()
+        |> Q.execute()
 
       assert result == {:ok, %{}}
       assert_received :child_ran
 
       failing = fn -> Q.new() |> Q.run(:inner, fn -> {:error, :boom} end) end
 
-      assert Q.new() |> Q.run(:_, failing) |> Q.exec() ==
+      assert Q.new() |> Q.run(:_, failing) |> Q.execute() ==
                {:error, :_, {:error, :inner, :boom, %{}}, %{}}
     end
 
@@ -481,14 +525,14 @@ defmodule QTest do
         Q.new()
         |> Q.put(:a, 1)
         |> Q.__branch__(fn -> Q.new() |> Q.put(:a, 2) end, [])
-        |> Q.exec()
+        |> Q.execute()
       end
 
       assert_raise ArgumentError, ~r/step :b conflicts with a step of the same name/, fn ->
         Q.new()
         |> Q.__branch__(fn -> Q.new() |> Q.put(:b, 1) end, [])
         |> Q.put(:b, 2)
-        |> Q.exec()
+        |> Q.execute()
       end
     end
   end
@@ -517,7 +561,7 @@ defmodule QTest do
         capture_io(fn ->
           que
           |> Q.debug()
-          |> Q.exec()
+          |> Q.execute()
         end)
 
       assert {%{init: :test, init2: :test2}, []} = Code.eval_string(printed)
@@ -525,7 +569,7 @@ defmodule QTest do
       assert capture_io(fn ->
                que
                |> Q.debug(only: :init)
-               |> Q.exec()
+               |> Q.execute()
              end) == "%{init: :test}\n"
     end
 
@@ -557,7 +601,7 @@ defmodule QTest do
                    fn ->
                      Q.new()
                      |> Q.run(:bad_return, fn _ -> {:invalid, 1} end)
-                     |> Q.exec()
+                     |> Q.execute()
                    end
 
       assert_raise RuntimeError,
@@ -565,7 +609,7 @@ defmodule QTest do
                    fn ->
                      Q.new()
                      |> Q.run(:empty, fn _ -> nil end)
-                     |> Q.exec()
+                     |> Q.execute()
                    end
     end
 

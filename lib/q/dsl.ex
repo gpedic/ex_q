@@ -13,7 +13,7 @@ defmodule Q.DSL do
 
   def compile(block, caller) do
     statements = statements(block)
-    check_exec!(statements, caller)
+    check_execution!(statements, caller)
     {body, _bound} = compile_statements(statements, [], caller)
 
     quote do
@@ -26,12 +26,15 @@ defmodule Q.DSL do
   defp statements({:__block__, _meta, statements}), do: statements
   defp statements(statement), do: [statement]
 
-  defp check_exec!(statements, caller) do
+  defp check_execution!(statements, caller) do
     statements
     |> Enum.drop(-1)
     |> Enum.each(fn
-      {:exec, meta, []} -> compile_error!(caller, meta, "exec() must be the last statement")
-      _statement -> :ok
+      {name, meta, []} when name in [:execute, :exec] ->
+        compile_error!(caller, meta, "#{name}() must be the last statement")
+
+      _statement ->
+        :ok
     end)
   end
 
@@ -102,10 +105,18 @@ defmodule Q.DSL do
     {ast, {branch_names ++ bound, steps}}
   end
 
-  defp compile_statement({:exec, _meta, []}, bound, steps, _caller) do
+  defp compile_statement({name, meta, []}, bound, steps, caller)
+       when name in [:execute, :exec] do
+    if name == :exec do
+      IO.warn(
+        "exec() is deprecated; use execute() instead",
+        Macro.Env.stacktrace(%{caller | line: Keyword.get(meta, :line, caller.line)})
+      )
+    end
+
     ast =
       quote do
-        queue = Q.exec(queue)
+        queue = Q.execute(queue)
       end
 
     {ast, {bound, steps}}
@@ -176,8 +187,8 @@ defmodule Q.DSL do
   defp compile_branch(block, bound, caller) do
     statements = statements(block)
 
-    for {:exec, meta, []} <- statements do
-      compile_error!(caller, meta, "exec() can't be used inside a branch")
+    for {name, meta, []} <- statements, name in [:execute, :exec] do
+      compile_error!(caller, meta, "#{name}() can't be used inside a branch")
     end
 
     {body, branch_bound} = compile_statements(statements, bound, caller)

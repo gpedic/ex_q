@@ -1,9 +1,9 @@
 defmodule Q do
   @moduledoc """
-  Build pipelines of named steps, in the spirit of `Ecto.Multi`, and run them with `exec/1`.
+  Build pipelines of named steps, in the spirit of `Ecto.Multi`, and run them with `execute/1`.
 
   Every step's result is stored in a state map under the step's name. When a step fails,
-  `exec/1` returns the failing step's name and error together with the state built so far.
+  `execute/1` returns the failing step's name and error together with the state built so far.
 
   ## Writing a pipeline
 
@@ -16,7 +16,7 @@ defmodule Q do
         trimmed = String.trim(input)       # a function that can't fail
         decoded <- Base.decode64(trimmed)  # a function that can fail
         _ <- Notifier.notify(decoded)      # runs, but isn't stored
-        exec()
+        execute()
       end
 
   A step's inputs are the earlier steps its expression uses; other variables are captured
@@ -28,9 +28,9 @@ defmodule Q do
   A step written with `<-` must return one of:
 
     * `{:ok, value}` - stores `value` under the step's name and continues
-    * `{:error, reason}` - stops; `exec/1` returns `{:error, name, reason, state}`
+    * `{:error, reason}` - stops; `execute/1` returns `{:error, name, reason, state}`
     * `:error` - same as `{:error, :error}`, for functions such as `Base.decode64/1`
-    * `{:halt, value}` - stores `value` and stops the pipeline; `exec/1` returns `{:ok, state}`
+    * `{:halt, value}` - stores `value` and stops the pipeline; `execute/1` returns `{:ok, state}`
     * `{:halt, value, propagate: false}` - like `{:halt, value}`, but when the queue runs as
       a child (see below) only the child stops
     * a queue - runs it as a child, see below
@@ -134,7 +134,7 @@ defmodule Q do
   ## Example
       iex> Q.new()
       ...> |> Q.put(:params, %{foo: "bar"})
-      ...> |> Q.exec()
+      ...> |> Q.execute()
       {:ok, %{params: %{foo: "bar"}}}
   """
   @spec put(t, name, any) :: t
@@ -210,11 +210,11 @@ defmodule Q do
   ## Example
       iex> Q.new()
       ...> |> Q.run(:write, fn _ -> {:ok, "Hello world!"} end)
-      ...> |> Q.exec()
+      ...> |> Q.execute()
       {:ok, %{write: "Hello world!"}}
   """
-  @spec exec(t) :: {:ok, state} | exec_error
-  def exec(%Q{operations: operations}) do
+  @spec execute(t) :: {:ok, state} | exec_error
+  def execute(%Q{operations: operations}) do
     case run_ops(Enum.reverse(operations), %{}) do
       {:halted, state, _propagate} -> {:ok, state}
       result -> result
@@ -222,9 +222,16 @@ defmodule Q do
   end
 
   @doc """
+  Deprecated alias for `execute/1`.
+  """
+  @deprecated "Use Q.execute/1 instead"
+  @spec exec(t) :: {:ok, state} | exec_error
+  def exec(queue), do: execute(queue)
+
+  @doc """
   Adds a function to be executed as part of the queue.
 
-  This function enables adding operations to the queue that are executed when `exec/1` is called.
+  This function enables adding operations to the queue that are executed when `execute/1` is called.
   The operations can be anonymous functions or functions in a module.
 
   The function should return either `{:ok, value}` if the operation was successful or
@@ -260,7 +267,7 @@ defmodule Q do
       iex> Q.new()
       ...> |> Q.put(:key, :b)
       ...> |> Q.run(:value, {Map, :fetch, [%{a: 1, b: 2}]}, {[:key], order: :append})
-      ...> |> Q.exec()
+      ...> |> Q.execute()
       {:ok, %{key: :b, value: 2}}
   """
   @spec run(t, name, step_fun | fun_mfa, params) :: t
@@ -278,7 +285,7 @@ defmodule Q do
       iex> Q.new()
       ...> |> Q.put(:text, "hello")
       ...> |> Q.let(:upper, &String.upcase/1, [:text])
-      ...> |> Q.exec()
+      ...> |> Q.execute()
       {:ok, %{text: "hello", upper: "HELLO"}}
   """
   @spec let(t, name, (... -> any) | fun_mfa, params) :: t
@@ -305,7 +312,7 @@ defmodule Q do
       `:error` or `{:halt, value}` (compiles to `run/4`)
     * `debug()` or `debug(opts)` - prints the state, see `debug/2`
     * `if`, `unless`, `case` or `cond` containing steps - the branch taken adds its steps
-    * `exec()` - runs the queue, as the last statement only
+    * `execute()` - runs the queue, as the last statement only
 
   Rules:
 
@@ -319,7 +326,7 @@ defmodule Q do
     * Expressions are evaluated when the queue runs, not when it's built.
 
   Breaking a rule is a compile error. The block returns the queue, unless it ends with
-  `exec()`.
+  `execute()`.
 
   ## Example
       iex> import Q
@@ -327,7 +334,7 @@ defmodule Q do
       ...>   input = "aGVsbG8="
       ...>   decoded <- Base.decode64(input)
       ...>   if decoded == "hello", do: greeting = true
-      ...>   exec()
+      ...>   execute()
       ...> end
       {:ok, %{input: "aGVsbG8=", decoded: "hello", greeting: true}}
   """

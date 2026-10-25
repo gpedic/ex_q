@@ -18,7 +18,7 @@ defmodule Q.DSLTest do
   defp named(queue) do
     queue do
       name = queue
-      exec()
+      execute()
     end
   end
 
@@ -29,6 +29,21 @@ defmodule Q.DSLTest do
   end
 
   describe "steps" do
+    test "terminal exec() still executes and warns at its source line" do
+      warning =
+        capture_io(:stderr, fn ->
+          assert {{:ok, %{value: 1}}, _bindings} =
+                   Code.eval_string(
+                     "import Q, only: [queue: 1]\nqueue do\n  value = 1\n  exec()\nend",
+                     [],
+                     file: "deprecated_queue.exs"
+                   )
+        end)
+
+      assert warning =~ "exec() is deprecated; use execute() instead"
+      assert warning =~ "deprecated_queue.exs:4"
+    end
+
     test "= stores a value, <- unwraps a result" do
       result =
         queue do
@@ -36,7 +51,7 @@ defmodule Q.DSLTest do
           decoded <- Base.decode64(input)
           upper = String.upcase(decoded)
         end
-        |> exec()
+        |> execute()
 
       assert {:ok, %{input: "aGVsbG8=", decoded: "hello", upper: "HELLO"}} = result
     end
@@ -48,7 +63,7 @@ defmodule Q.DSLTest do
           validated <- positive(input)
           never = raise "should not run"
         end
-        |> exec()
+        |> execute()
 
       assert {:error, :validated, :not_positive, %{input: -1}} = result
     end
@@ -58,7 +73,7 @@ defmodule Q.DSLTest do
         queue do
           input = "not base64"
           decoded <- Base.decode64(input)
-          exec()
+          execute()
         end
 
       assert {:error, :decoded, :error, _state} = result
@@ -70,7 +85,7 @@ defmodule Q.DSLTest do
           count = 0
           checked <- if(count == 0, do: {:halt, :zero}, else: {:ok, count})
           never = raise "should not run"
-          exec()
+          execute()
         end
 
       assert {:ok, %{count: 0, checked: :zero}} = result
@@ -91,7 +106,7 @@ defmodule Q.DSLTest do
         queue do
         end
 
-      assert {:ok, %{}} = exec(empty)
+      assert {:ok, %{}} = execute(empty)
     end
   end
 
@@ -102,7 +117,7 @@ defmodule Q.DSLTest do
           first = "hello"
           second = "world"
           joined = "#{first} #{second}"
-          exec()
+          execute()
         end
 
       assert {:ok, %{joined: "hello world"}} = result
@@ -115,7 +130,7 @@ defmodule Q.DSLTest do
         queue do
           text = "hi"
           shout = String.upcase(text) <> punctuation
-          exec()
+          execute()
         end
 
       assert {:ok, %{shout: "HI!"}} = result
@@ -126,7 +141,7 @@ defmodule Q.DSLTest do
         queue do
           n = 10
           doubled = Enum.map([1, 2], fn n -> n * 2 end)
-          exec()
+          execute()
         end
 
       assert {:ok, %{n: 10, doubled: [2, 4]}} = result
@@ -139,7 +154,7 @@ defmodule Q.DSLTest do
           text = "hi" <> @suffix
         end
 
-      assert {:ok, %{text: "hi!"}} = exec(q)
+      assert {:ok, %{text: "hi!"}} = execute(q)
     end
 
     test "a caller variable named queue is not the internal queue" do
@@ -151,7 +166,7 @@ defmodule Q.DSLTest do
         queue do
           n = 42
           label = inspect(n)
-          exec()
+          execute()
         end
 
       assert {:ok, %{label: "42"}} = result
@@ -166,7 +181,7 @@ defmodule Q.DSLTest do
           _ = send(self(), {:ran, a})
           _ = send(self(), :again)
           _sent <- {:ok, :sent}
-          exec()
+          execute()
         end
 
       assert {:ok, %{a: 1} = state} = result
@@ -179,7 +194,7 @@ defmodule Q.DSLTest do
       result =
         queue do
           _notified <- {:error, :offline}
-          exec()
+          execute()
         end
 
       assert {:error, :_notified, :offline, %{}} = result
@@ -195,7 +210,7 @@ defmodule Q.DSLTest do
             debug()
             b = 2
             debug(only: :b)
-            exec()
+            execute()
           end
         end)
 
@@ -208,7 +223,7 @@ defmodule Q.DSLTest do
         queue do
           name = "joe"
           greeting <- greeting(name)
-          exec()
+          execute()
         end
 
       assert {:ok, %{name: "joe", greeting: %{greeting: "hello joe"}}} = result
@@ -225,7 +240,7 @@ defmodule Q.DSLTest do
               upper = String.upcase(text)
             end
 
-          exec()
+          execute()
         end
 
       assert {:ok, %{name: "joe", greeting: %{text: "hello joe", upper: "HELLO JOE"}}} = result
@@ -241,10 +256,32 @@ defmodule Q.DSLTest do
             end
 
           after_child = :ran
-          exec()
+          execute()
         end
 
       assert {:ok, %{cached: %{hit: :cached}, after_child: :ran}} = result
+    end
+
+    test "a local halt inside a branch stops the child, not just the branch" do
+      result =
+        queue do
+          cached <-
+            queue do
+              enabled = true
+
+              if enabled do
+                hit <- {:halt, :cached, propagate: false}
+                never_in_branch = raise("branch must stop")
+              end
+
+              never_in_child = raise("child must stop")
+            end
+
+          after_child = :ran
+          execute()
+        end
+
+      assert result == {:ok, %{cached: %{enabled: true, hit: :cached}, after_child: :ran}}
     end
   end
 
@@ -260,7 +297,7 @@ defmodule Q.DSLTest do
           shipping = 5
         end
 
-        exec()
+        execute()
       end
     end
 
@@ -276,7 +313,7 @@ defmodule Q.DSLTest do
           on = flag
           if on, do: yes = true
           unless on, do: no = true
-          exec()
+          execute()
         end
       end
 
@@ -295,7 +332,7 @@ defmodule Q.DSLTest do
             {:error, reason} -> failed = reason
           end
 
-          exec()
+          execute()
         end
       end
 
@@ -320,7 +357,7 @@ defmodule Q.DSLTest do
               sign = :large
           end
 
-          exec()
+          execute()
         end
       end
 
@@ -342,7 +379,7 @@ defmodule Q.DSLTest do
           end
 
           charged <- raise("should not run")
-          exec()
+          execute()
         end
 
       assert {:error, :approved, :rejected, %{total: 120, request: {:approval, 120}}} = result
@@ -354,7 +391,7 @@ defmodule Q.DSLTest do
           cached = true
           if cached, do: hit <- {:halt, :cached}
           computed <- raise("should not run")
-          exec()
+          execute()
         end
 
       assert {:ok, %{cached: true, hit: :cached}} = result
@@ -397,9 +434,11 @@ defmodule Q.DSLTest do
       assert error.description =~ "b is already a step in this queue"
     end
 
-    test "exec() inside a branch" do
-      error = compile_error("queue do\n  a = 1\n  if a > 0, do: exec()\nend")
-      assert error.description =~ "exec() can't be used inside a branch"
+    test "execute() inside a branch" do
+      for name <- [:execute, :exec] do
+        error = compile_error("queue do\n  a = 1\n  if a > 0, do: #{name}()\nend")
+        assert error.description =~ "#{name}() can't be used inside a branch"
+      end
     end
 
     test "a bare expression" do
@@ -433,9 +472,11 @@ defmodule Q.DSLTest do
       assert error.line == 5
     end
 
-    test "exec() before the last statement" do
-      error = compile_error("queue do\n  exec()\n  a = 1\nend")
-      assert error.description =~ "exec() must be the last statement"
+    test "execute() before the last statement" do
+      for name <- [:execute, :exec] do
+        error = compile_error("queue do\n  #{name}()\n  a = 1\nend")
+        assert error.description =~ "#{name}() must be the last statement"
+      end
     end
 
     test "1.x style calls point at the new syntax" do
