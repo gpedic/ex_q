@@ -16,12 +16,13 @@ defmodule Q do
         trimmed = String.trim(input)       # a function that can't fail
         decoded <- Base.decode64(trimmed)  # a function that can fail
         notified <- Notifier.notify(decoded)
-        execute()
       end
+      |> execute()
 
   A step's inputs are the earlier steps its expression uses; other variables are captured
   as in any closure. `if`, `unless`, `case` and `cond` around steps choose which steps run
-  from earlier results. See `queue/1` for all the rules.
+  from earlier results. The block only builds the queue; `execute/1` runs it. See `queue/1`
+  for all the rules.
 
   ## Results
 
@@ -258,13 +259,6 @@ defmodule Q do
   end
 
   @doc """
-  Deprecated alias for `execute/1`.
-  """
-  @deprecated "Use Q.execute/1 instead"
-  @spec exec(t) :: {:ok, state} | exec_error
-  def exec(queue), do: execute(queue)
-
-  @doc """
   Adds a step whose function receives the whole accumulated state as one argument.
 
   MFA fixed arguments follow the state. Use `run/4` with `[]` for no queue inputs, or
@@ -373,7 +367,6 @@ defmodule Q do
       `:error` or `{:halt, value}` (compiles to `run/4`)
     * `debug()` or `debug(opts)` - prints the state, see `debug/2`
     * `if`, `unless`, `case` or `cond` containing steps - the branch taken adds its steps
-    * `execute()` - runs the queue, as the last statement only
 
   Rules:
 
@@ -386,8 +379,9 @@ defmodule Q do
       results as a map under the step's name. `name <- queue do ... end` nests a block inline.
     * Expressions are evaluated when the queue runs, not when it's built.
 
-  Breaking a rule is a compile error. The block returns the queue, unless it ends with
-  `execute()`.
+  Breaking a rule is a compile error. The block returns the queue without running it, so a
+  function can build a queue and its caller decides when to run it, or runs it as a child
+  step. Run it with `execute/1`.
 
   ## Example
       iex> import Q
@@ -395,8 +389,8 @@ defmodule Q do
       ...>   input = "aGVsbG8="
       ...>   decoded <- Base.decode64(input)
       ...>   if decoded == "hello", do: greeting = true
-      ...>   execute()
       ...> end
+      ...> |> execute()
       {:ok, %{input: "aGVsbG8=", decoded: "hello", greeting: true}}
   """
   defmacro queue(do: block) do
@@ -589,6 +583,11 @@ defmodule Q do
 
       %Q{operations: operations} ->
         run_child(name, operations, state)
+
+      {:error, _name, _reason, _state} = executed ->
+        raise "expected operation `#{Kernel.inspect(name)}` to return a queue, not the result " <>
+                "of executing one, got: #{Kernel.inspect(executed)}; return the queue instead " <>
+                "of executing it, so it runs as a child"
 
       other ->
         raise "expected operation `#{Kernel.inspect(name)}` to return {:ok, value}, {:halt, value}, {:halt, value, propagate: boolean}, {:error, value}, :error or a queue, got: #{Kernel.inspect(other)}"

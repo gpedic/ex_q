@@ -131,19 +131,16 @@ defmodule QTest do
     end
   end
 
-  describe "deprecated exec/1" do
-    test "preserves execution results" do
-      legacy_execute = Function.capture(Q, :exec, 1)
+  describe "running a queue" do
+    test "exec/1 no longer exists" do
+      refute function_exported?(Q, :exec, 1)
+    end
 
-      queues = [
-        Q.new(),
-        Q.new() |> Q.put(:value, 1),
-        Q.new() |> Q.run(:failed, fn -> {:error, :offline} end, []),
-        Q.new() |> Q.run(:stopped, fn -> {:halt, :done} end, [])
-      ]
+    test "a step returning an executed queue's error points at returning the queue" do
+      failing = Q.new() |> Q.run(:inner, fn -> {:error, :boom} end, [])
 
-      for queue <- queues do
-        assert legacy_execute.(queue) == Q.execute(queue)
+      assert_raise RuntimeError, ~r/return the queue instead of executing it/, fn ->
+        Q.new() |> Q.run(:child, fn -> Q.execute(failing) end, []) |> Q.execute()
       end
     end
   end

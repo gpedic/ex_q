@@ -12,9 +12,7 @@ defmodule Q.DSL do
   @conditionals [:if, :unless, :case, :cond]
 
   def compile(block, caller) do
-    statements = statements(block)
-    check_execution!(statements, caller)
-    {body, _bound} = compile_statements(statements, [], caller)
+    {body, _bound} = compile_statements(statements(block), [], caller)
 
     quote do
       queue = Q.new()
@@ -25,18 +23,6 @@ defmodule Q.DSL do
 
   defp statements({:__block__, _meta, statements}), do: statements
   defp statements(statement), do: [statement]
-
-  defp check_execution!(statements, caller) do
-    statements
-    |> Enum.drop(-1)
-    |> Enum.each(fn
-      {name, meta, []} when name in [:execute, :exec] ->
-        compile_error!(caller, meta, "#{name}() must be the last statement")
-
-      _statement ->
-        :ok
-    end)
-  end
 
   # `bound` lists every step name visible to this block, to reject duplicates;
   # `steps` lists the names bound earlier in this block, which become params.
@@ -111,21 +97,16 @@ defmodule Q.DSL do
     {ast, {branch_names ++ bound, steps}}
   end
 
-  defp compile_statement({name, meta, []}, bound, steps, caller)
+  # A queue block only builds a queue, so it can be returned from a helper and run
+  # as a child; running it is the caller's job.
+  defp compile_statement({name, meta, []}, _bound, _steps, caller)
        when name in [:execute, :exec] do
-    if name == :exec do
-      IO.warn(
-        "exec() is deprecated; use execute() instead",
-        Macro.Env.stacktrace(%{caller | line: Keyword.get(meta, :line, caller.line)})
-      )
-    end
-
-    ast =
-      quote do
-        queue = Q.execute(queue)
-      end
-
-    {ast, {bound, steps}}
+    compile_error!(
+      caller,
+      meta,
+      "#{name}() is not a queue statement; a queue block builds a queue, " <>
+        "run it with `queue do ... end |> execute()`"
+    )
   end
 
   defp compile_statement({name, meta, args}, _bound, _steps, caller)
@@ -272,13 +253,7 @@ defmodule Q.DSL do
   defp compile_branch(nil, _bound, _caller), do: {quote(do: Q.new()), []}
 
   defp compile_branch(block, bound, caller) do
-    statements = statements(block)
-
-    for {name, meta, []} <- statements, name in [:execute, :exec] do
-      compile_error!(caller, meta, "#{name}() can't be used inside a branch")
-    end
-
-    {body, branch_bound} = compile_statements(statements, bound, caller)
+    {body, branch_bound} = compile_statements(statements(block), bound, caller)
 
     ast =
       quote do

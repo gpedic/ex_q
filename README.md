@@ -56,8 +56,8 @@ def process_data(data) do
     validated <- validate_schema(decoded)
     normalized <- normalize_data(validated)
     enriched <- add_metadata(normalized)
-    execute()
   end
+  |> execute()
 end
 
 # If JSON parsing fails
@@ -127,7 +127,7 @@ end
 
 A step's inputs are the earlier steps its expression uses: `decoded <- Base.decode64(trimmed)` depends on `trimmed`. Other variables, such as function arguments, are captured as in any closure. Steps run in order when the queue is executed, and each result is stored under the step's name.
 
-The block returns the queue. Run it with `execute()` as the last statement, or by piping it into `execute/1`.
+The block only builds the queue and returns it; pipe it into `execute/1` to run it. That way a function can build a queue and leave it to the caller whether to run it now or as a [sub-pipeline](#sub-pipelines).
 
 ## Halting execution early
 
@@ -140,8 +140,8 @@ def process_data(input) do
     cached <- check_cache(request.key)
     processed <- expensive_operation(request)
     stored <- store_in_cache(request.key, processed)
-    execute()
   end
+  |> execute()
 end
 
 defp check_cache(key) do
@@ -173,8 +173,8 @@ queue do
   end
 
   charged <- Payments.charge(order)
-  execute()
 end
+|> execute()
 ```
 
 Steps in the branch that runs are added to the result, and an error or halt in them stops the pipeline like any other step. As with variables in Elixir, a step bound inside a branch can't be used after the conditional.
@@ -203,8 +203,8 @@ queue do
   billing <- billing_steps(user)
   shipping <- shipping_steps(user)
   confirmation <- confirm(billing.invoice, shipping.tracking)
-  execute()
 end
+|> execute()
 
 # {:ok, %{
 #   user: ...,
@@ -235,8 +235,8 @@ queue do
   a = 1
   b = 2
   debug(only: :a)
-  execute()
 end
+|> execute()
 
 # Prints:
 # %{a: 1}
@@ -269,7 +269,7 @@ In the functional API, `Q.debug(q, options)` takes ordinary options and validate
 
 ## Rules
 
-* Every statement in a `queue` block is a step (`name = expr` or `name <- expr`), `debug()`, a conditional containing steps, or `execute()` as the last statement. Every step must have a name, including steps run for their side effects.
+* Every statement in a `queue` block is a step (`name = expr` or `name <- expr`), `debug()`, or a conditional containing steps. `execute()` isn't a statement: the block builds the queue, and `execute/1` runs it. Every step must have a name, including steps run for their side effects.
 * The left side of a step is a single named variable, and each name is bound once. Every successful step stores its result, including names starting with `_`. Bare `_` is not allowed.
 * Mistakes, including a malformed `if`, `unless`, `case` or `cond`, are compile errors pointing at the line.
 

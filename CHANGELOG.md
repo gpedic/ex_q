@@ -11,8 +11,8 @@ queue do
   input = data
   decoded <- Base.decode64(input)
   upper = String.upcase(decoded)
-  execute()
 end
+|> execute()
 ```
 
 The 1.x syntax is removed, and its calls inside a `queue` block are a compile error pointing at the new syntax. To upgrade, rewrite each statement:
@@ -24,10 +24,11 @@ The 1.x syntax is removed, and its calls inside a `queue` block are a compile er
 | `run(:valid, fn %{decoded: d} -> validate(d) end)` | `valid <- validate(decoded)` |
 | `run(:cs, {Mod, :changeset, [%S{}]}, {[:a, :b], order: :append})` | `cs <- Mod.changeset(%S{}, a, b)` |
 | `inspect()` / `inspect(only: :a)` | `debug()` / `debug(only: :a)` |
-| `exec()` | `execute()` (`exec()` is deprecated) |
+| `exec()` at the end of the block | `queue do ... end \|> execute()` |
 
 Also new in the block:
 
+- The block only builds the queue; pipe it into `execute/1` to run it. `execute()` and `exec()` inside the block are compile errors, so a function that returns a queue can't run it by accident before its caller runs it as a sub-pipeline.
 - `name = expr` stores a value or the result of a function that can't fail; `<-` is for functions returning `{:ok, value}` or `{:error, reason}`.
 - `if`, `unless`, `case` and `cond` around steps choose which steps run, based on earlier results.
 - Every step must have a unique name and stores its successful result, including names starting with `_`. Bare `_` bindings are rejected at compile time.
@@ -38,8 +39,6 @@ Also new in the block:
 ### Functional API
 
 New:
-
-- **`execute/1`** replaces `exec/1`, which remains available as a deprecated alias. In a `queue` block, use terminal `execute()`; terminal `exec()` still works but emits a compile warning.
 
 - **`let/4`**: a step for functions that can't fail. The return value is stored as is, so `let(:upper, &String.upcase/1, [:text])` needs no `{:ok, _}` wrapping.
 - **Child queues**: a `run/4` function may return a queue, which runs as a child with its result map stored under the step's name. A failing child step is reported as `{:error, step, {:error, child_step, reason, child_state}, state}`. A child's halt stops the parent too, unless it is `{:halt, value, propagate: false}`.
@@ -56,7 +55,9 @@ Breaking:
 - **`Q.inspect/2` is renamed to `Q.debug/2`.** The old name clashed with `Kernel.inspect/2` in any module that did `import Q`.
 - **`run/6` is removed.**
   - Upgrade: `run(q, name, mod, fun, args, params)` becomes `run(q, name, {mod, fun, args}, params)`.
-- **`execute/1` (and deprecated `exec/1`) on an empty queue returns `{:ok, %{}}`** instead of `{:ok, nil}`.
+- **`exec/1` is renamed to `execute/1`.**
+  - Upgrade: replace `Q.exec(queue)` and `|> exec()` with `Q.execute(queue)` and `|> execute()`.
+- **`execute/1` on an empty queue returns `{:ok, %{}}`** instead of `{:ok, nil}`.
 - **A step returning a bare `:error` fails the pipeline** with `{:error, step, :error, state}`. It used to raise.
   - Upgrade: code that rescued the `RuntimeError` for such steps should match the error tuple instead.
 - **Build-time mistakes raise `ArgumentError`** instead of `RuntimeError`: a duplicate step name, or a param that refers to a step that doesn't exist.
