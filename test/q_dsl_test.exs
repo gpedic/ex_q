@@ -28,6 +28,17 @@ defmodule Q.DSLTest do
     end
   end
 
+  # Compiles under a file name, with the import on line 1, so `queue do` is line 2
+  defp malformed(code) do
+    error =
+      assert_raise CompileError, fn ->
+        Code.eval_string("import Q, only: [queue: 1]\n" <> code, [], file: "malformed.exs")
+      end
+
+    assert error.file =~ "malformed.exs"
+    error
+  end
+
   describe "steps" do
     test "terminal exec() still executes and warns at its source line" do
       warning =
@@ -605,6 +616,142 @@ defmodule Q.DSLTest do
         end
 
       assert [let: :a, branch: nil] = Q.to_list(q)
+    end
+  end
+
+  describe "malformed conditionals" do
+    test "an unknown if option" do
+      error = malformed("queue do\n  if false, do: approved = true, els: rejected = true\nend")
+      assert error.description == "unknown if option :els; supported options are :do and :else"
+      assert error.line == 3
+    end
+
+    test "if or unless without do:" do
+      error = malformed("queue do\n  if true, then: approved = true\nend")
+      assert error.description == "if requires a do: block"
+      assert error.line == 3
+
+      error = malformed("queue do\n  a = 1\n  unless a > 0, else: b = 2\nend")
+      assert error.description == "unless requires a do: block"
+      assert error.line == 4
+    end
+
+    test "a duplicate option" do
+      error = malformed("queue do\n  if true, do: a = 1, do: b = 2\nend")
+      assert error.description == "duplicate if option :do"
+    end
+
+    test "the wrong number of arguments" do
+      for code <- ["if(true)", "if(true, [do: (a = 1)], :extra)", "case(:ok)", "cond()"] do
+        error = malformed("queue do\n  #{code}\nend")
+        assert error.description =~ "requires a do: block"
+        assert error.line == 3
+      end
+    end
+
+    test "case and cond without clauses" do
+      error = malformed("queue do\n  case :ok do\n  end\nend")
+      assert error.description == "case requires at least one -> clause"
+      assert error.line == 3
+
+      error = malformed("queue do\n  cond do\n  end\nend")
+      assert error.description == "cond requires at least one -> clause"
+    end
+
+    test "case and cond bodies without -> clauses" do
+      error = malformed("queue do\n  case :ok do\n    a = 1\n  end\nend")
+
+      assert error.description ==
+               "expected case clauses in the form `pattern -> steps`, got: a = 1"
+
+      error = malformed("queue do\n  cond do\n    a = 1\n  end\nend")
+
+      assert error.description ==
+               "expected cond clauses in the form `condition -> steps`, got: a = 1"
+    end
+
+    test "an unknown case option" do
+      error =
+        malformed("queue do\n  case :ok do\n    :ok -> a = 1\n  else\n    b = 2\n  end\nend")
+
+      assert error.description == "unknown case option :else; supported options are :do"
+    end
+
+    test "a malformed clause is reported at its own line" do
+      # The parser can't produce this, but a macro can
+      clauses = [
+        {:->, [line: 3], [[:ok], {:=, [line: 3], [{:a, [line: 3], nil}, 1]}]},
+        {:oops, [line: 4], nil}
+      ]
+
+      ast =
+        {:__block__, [],
+         [
+           quote(do: import(Q, only: [queue: 1])),
+           {:queue, [line: 1], [[do: {:case, [line: 2], [:ok, [do: clauses]]}]]}
+         ]}
+
+      error =
+        assert_raise CompileError, fn -> Code.eval_quoted(ast, [], file: "malformed.exs") end
+
+      assert error.description ==
+               "expected case clauses in the form `pattern -> steps`, got: oops"
+
+      assert error.line == 4
+    end
+
+    test "a malformed conditional nested in a branch" do
+      code = """
+      queue do
+        a = 1
+
+        case a do
+          1 ->
+            if a > 0, do: b = 2, els: c = 3
+        end
+      end
+      """
+
+      error = malformed(code)
+      assert error.description == "unknown if option :els; supported options are :do and :else"
+      assert error.line == 7
+    end
+
+    test "valid forms still compile and run" do
+      result =
+        queue do
+          n = 5
+
+          case n do
+            m when m > 3 -> big = true
+            _ -> small = true
+          end
+
+          if n > 10 do
+          end
+
+          unless n > 10, do: low = true
+          if n > 0, do: positive = true, else: nil
+        end
+        |> execute()
+
+      assert {:ok, %{n: 5, big: true, low: true, positive: true} = state} = result
+      refute Map.has_key?(state, :small)
+    end
+
+    test "options Q accepts but Elixir doesn't are still rejected, by Elixir" do
+      # else: before do: passes Q's checks; the options are kept as written, so
+      # Elixir's own if rejects them instead of Q silently reordering them
+      assert_raise ArgumentError, ~r/keys for if/, fn ->
+        Code.eval_string("""
+        import Q, only: [queue: 1]
+
+        queue do
+          a = 1
+          if a > 0, else: b = 2, do: c = 3
+        end
+        """)
+      end
     end
   end
 

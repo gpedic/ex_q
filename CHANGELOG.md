@@ -33,7 +33,7 @@ Also new in the block:
 - Every step must have a unique name and stores its successful result, including names starting with `_`. Bare `_` bindings are rejected at compile time.
 - A step whose function returns a queue runs it as a sub-pipeline, with its results stored as a map under the step's name; `name <- queue do ... end` nests a block inline.
 - A halt stops the whole pipeline, also from inside a sub-pipeline; `{:halt, value, propagate: false}` stops only the queue the step is in.
-- Mistakes, such as binding a name twice, are compile errors pointing at the line.
+- Mistakes, such as binding a name twice or a malformed `if`, `unless`, `case` or `cond` (a missing `do:`, an unknown or duplicate option, no `->` clauses), are compile errors pointing at the line.
 
 ### Functional API
 

@@ -100,7 +100,7 @@ defmodule Q.DSL do
   # function, so inside the branches they're plain variables.
   defp compile_statement({kind, meta, args} = conditional, bound, steps, caller)
        when kind in @conditionals and is_list(args) do
-    {branches, branch_names} = compile_branches(kind, args, bound, caller)
+    {branches, branch_names} = compile_branches(kind, args, meta, bound, caller)
     {fun, params} = step_fun(conditional, steps, {kind, meta, branches})
 
     ast =
@@ -164,20 +164,92 @@ defmodule Q.DSL do
     )
   end
 
-  defp compile_branches(kind, [condition, clauses], bound, caller) when kind in [:if, :unless] do
-    {do_branch, do_names} = compile_branch(Keyword.get(clauses, :do), bound, caller)
-    {else_branch, else_names} = compile_branch(Keyword.get(clauses, :else), bound, caller)
-    {[condition, [do: do_branch, else: else_branch]], Enum.uniq(do_names ++ else_names)}
+  # Conditionals are rewritten before Elixir sees them, so their shape is checked
+  # here: anything the rewrite didn't understand would otherwise be dropped.
+  defp compile_branches(kind, [condition, opts], meta, bound, caller)
+       when kind in [:if, :unless] do
+    check_options!(kind, opts, [:do, :else], meta, caller)
+
+    # The user's options are kept, with each branch compiled in place
+    {opts, names} =
+      Enum.map_reduce(opts, [], fn {key, block}, names ->
+        {branch, branch_names} = compile_branch(block, bound, caller)
+        {{key, branch}, branch_names ++ names}
+      end)
+
+    # Without an else, the branch function still has to return a queue
+    opts = if Keyword.has_key?(opts, :else), do: opts, else: opts ++ [else: quote(do: Q.new())]
+    {[condition, opts], Enum.uniq(names)}
   end
 
-  defp compile_branches(:case, [expr, [do: clauses]], bound, caller) do
+  defp compile_branches(:case, [expr, opts], meta, bound, caller) do
+    check_options!(:case, opts, [:do], meta, caller)
+    clauses = arrow_clauses!(:case, Keyword.fetch!(opts, :do), meta, caller)
     {clauses, names} = compile_clauses(clauses, bound, caller)
     {[expr, [do: clauses]], names}
   end
 
-  defp compile_branches(:cond, [[do: clauses]], bound, caller) do
+  defp compile_branches(:cond, [opts], meta, bound, caller) do
+    check_options!(:cond, opts, [:do], meta, caller)
+    clauses = arrow_clauses!(:cond, Keyword.fetch!(opts, :do), meta, caller)
     {clauses, names} = compile_clauses(clauses, bound, caller)
     {[[do: clauses]], names}
+  end
+
+  defp compile_branches(kind, _args, meta, _bound, caller) do
+    compile_error!(caller, meta, "#{kind} requires a do: block")
+  end
+
+  defp check_options!(kind, opts, allowed, meta, caller) do
+    keys = if Keyword.keyword?(opts), do: Keyword.keys(opts), else: []
+
+    cond do
+      not Keyword.keyword?(opts) or :do not in keys ->
+        compile_error!(caller, meta, "#{kind} requires a do: block")
+
+      (unknown = Enum.reject(keys, &(&1 in allowed))) != [] ->
+        compile_error!(
+          caller,
+          meta,
+          "unknown #{kind} option #{inspect(hd(unknown))}; supported options are " <>
+            Enum.map_join(allowed, " and ", &inspect/1)
+        )
+
+      (duplicates = keys -- Enum.uniq(keys)) != [] ->
+        compile_error!(caller, meta, "duplicate #{kind} option #{inspect(hd(duplicates))}")
+
+      true ->
+        :ok
+    end
+  end
+
+  defp arrow_clauses!(kind, body, meta, caller) do
+    form = if kind == :case, do: "pattern -> steps", else: "condition -> steps"
+
+    case body do
+      empty
+      when empty == [] or
+             (is_tuple(empty) and elem(empty, 0) == :__block__ and elem(empty, 2) == []) ->
+        compile_error!(caller, meta, "#{kind} requires at least one -> clause")
+
+      clauses when is_list(clauses) ->
+        for clause <- clauses, not match?({:->, _, [head, _]} when is_list(head), clause) do
+          compile_error!(
+            caller,
+            meta(clause) ++ meta,
+            "expected #{kind} clauses in the form `#{form}`, got: #{Macro.to_string(clause)}"
+          )
+        end
+
+        clauses
+
+      other ->
+        compile_error!(
+          caller,
+          meta,
+          "expected #{kind} clauses in the form `#{form}`, got: #{Macro.to_string(other)}"
+        )
+    end
   end
 
   defp compile_clauses(clauses, bound, caller) do
@@ -190,8 +262,8 @@ defmodule Q.DSL do
     {clauses, Enum.uniq(names)}
   end
 
-  # Returns code building the branch's queue, and the step names it binds. A
-  # missing branch (`if` without `else`) adds no steps.
+  # Returns code building the branch's queue, and the step names it binds. An
+  # explicit nil branch (`do: nil`) adds no steps.
   defp compile_branch(nil, _bound, _caller), do: {quote(do: Q.new()), []}
 
   defp compile_branch(block, bound, caller) do

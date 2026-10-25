@@ -255,7 +255,7 @@ In the functional API, `Q.debug(q, options)` takes ordinary options and validate
 
 * Every statement in a `queue` block is a step (`name = expr` or `name <- expr`), `debug()`, a conditional containing steps, or `execute()` as the last statement. Every step must have a name, including steps run for their side effects.
 * The left side of a step is a single named variable, and each name is bound once. Every successful step stores its result, including names starting with `_`. Bare `_` is not allowed.
-* Mistakes are compile errors pointing at the line.
+* Mistakes, including a malformed `if`, `unless`, `case` or `cond`, are compile errors pointing at the line.
 
 ## Building queues programmatically
 
