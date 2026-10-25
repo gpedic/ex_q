@@ -53,7 +53,7 @@ defmodule QTest do
         |> Q.run(:bad_return, fn _ -> {:bad, 1} end)
 
       assert_raise RuntimeError,
-                   ~r/^expected operation `:bad_return` to return {:ok, value}, {:halt, value}, {:halt, value, propagate: boolean}, {:error, value}, :error or a queue, got: {:bad, 1}$/,
+                   ~r/^expected step :bad_return to return {:ok, value}, {:error, reason}, :error, {:halt, value}, {:halt, value, propagate: boolean} or a queue, got: {:bad, 1}$/,
                    fn ->
                      Q.execute(q)
                    end
@@ -156,7 +156,7 @@ defmodule QTest do
     end
 
     test "repeating an operation" do
-      assert_raise ArgumentError, ~r":test is already a member", fn ->
+      assert_raise ArgumentError, ~r":test is already a step in this queue", fn ->
         Q.new() |> Q.put(:test, :test) |> Q.put(:test, :fails)
       end
     end
@@ -263,7 +263,7 @@ defmodule QTest do
     end
 
     test "it should fail to run an operation with invalid params" do
-      assert_raise ArgumentError, ~r"The parameter :foo does not exist in the queue.", fn ->
+      assert_raise ArgumentError, ~r"param :foo is not a step added before this one", fn ->
         Q.new()
         |> Q.run(:read, fn _ -> {:ok, "hello world"} end)
         |> Q.run(:write, fn _ -> {:error, :invalid_params} end, [:foo])
@@ -527,7 +527,7 @@ defmodule QTest do
       assert Q.operations(queue) == [{:input, 7}, {:double, 7}, :summary]
       assert Q.__to_list__(queue) == [put: {:input, 7}, run: {:double, 7}, let: :summary]
 
-      assert_raise ArgumentError, ~r/is already a member/, fn ->
+      assert_raise ArgumentError, ~r/is already a step in this queue/, fn ->
         Q.run(queue, {:input, 7}, fn -> {:ok, :duplicate} end, [])
       end
     end
@@ -601,7 +601,7 @@ defmodule QTest do
       ]
 
       for build <- builders do
-        assert_raise ArgumentError, ~r/:_step is already a member/, build
+        assert_raise ArgumentError, ~r/:_step is already a step in this queue/, build
       end
     end
 
@@ -839,7 +839,7 @@ defmodule QTest do
 
     test "other third elements of a halt are invalid returns" do
       for bad <- [{:halt, 1, :bogus}, {:halt, 1, other: true}, {:halt, 1, propagate: :yes}] do
-        assert_raise RuntimeError, ~r/expected operation `:step` to return/, fn ->
+        assert_raise RuntimeError, ~r/expected step :step to return/, fn ->
           Q.new() |> Q.run(:step, fn -> bad end, []) |> Q.execute()
         end
       end
@@ -1019,14 +1019,14 @@ defmodule QTest do
     test "duplicating an operation will raise and error" do
       fun = fn _ -> {:ok, :ok} end
 
-      assert_raise ArgumentError, ~r":run is already a member", fn ->
+      assert_raise ArgumentError, ~r":run is already a step in this queue", fn ->
         Q.new() |> Q.run(:run, fun) |> Q.run(:run, fun)
       end
     end
 
     test "returning invalid return value will raise and error" do
       assert_raise RuntimeError,
-                   ~r/^expected operation `:bad_return` to return {:ok, value}, {:halt, value}, {:halt, value, propagate: boolean}, {:error, value}, :error or a queue, got: {:invalid, 1}$/,
+                   ~r/^expected step :bad_return to return {:ok, value}, {:error, reason}, :error, {:halt, value}, {:halt, value, propagate: boolean} or a queue, got: {:invalid, 1}$/,
                    fn ->
                      Q.new()
                      |> Q.run(:bad_return, fn _ -> {:invalid, 1} end)
@@ -1034,7 +1034,7 @@ defmodule QTest do
                    end
 
       assert_raise RuntimeError,
-                   ~r"expected operation `:empty` to return {:ok, value}, {:halt, value}, {:halt, value, propagate: boolean}, {:error, value}, :error or a queue, got: nil",
+                   ~r"expected step :empty to return {:ok, value}, {:error, reason}, :error, {:halt, value}, {:halt, value, propagate: boolean} or a queue, got: nil",
                    fn ->
                      Q.new()
                      |> Q.run(:empty, fn _ -> nil end)

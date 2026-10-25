@@ -131,10 +131,7 @@ defmodule Q do
            | {:debug, {:deferred, call}}
 
   @doc """
-  Creates and returns a new, empty `Q` struct.
-
-  The resulting queue can be used as a starting point for queue operations,
-  such as `put/3` and `run/4`.
+  Returns an empty queue, to add steps to with `put/3`, `run/4`, `let/4` and `debug/2`.
 
   ## Example
       iex> Q.new() |> Q.operations()
@@ -147,11 +144,10 @@ defmodule Q do
   end
 
   @doc """
-  Adds a value to the state so far under the given name.
+  Adds a step that stores `value` under `name`.
 
-  This function modifies the queue by associating the given `name` with a `value`.
-  If the operation is successful, the `name` will become a key in the queue's internal
-  state map, and `value` will be its associated value.
+  Returns a new queue with the step added; queues are immutable. When the queue runs, the
+  step stores `value` in the state under `name`, where later steps can use it.
 
   ## Params
 
@@ -191,9 +187,11 @@ defmodule Q do
   end
 
   @doc """
-  Returns a list of operation names stored in the queue, in the order they were added.
+  Returns the names of the queue's steps, in the order they were added.
 
-  This function can be used to review the sequence of operations added to the queue.
+  Debug calls and conditionals aren't steps, so they aren't listed. Neither are the steps
+  inside a conditional or a child queue: which ones run is only decided when the queue runs.
+  A child queue appears as the step that runs it.
 
   ## Example
       iex> Q.new()
@@ -289,7 +287,7 @@ defmodule Q do
   The operations can be anonymous functions or functions in a module.
 
   The function should return either `{:ok, value}` if the operation was successful or
-  `{:error, value}` if the operation failed. Functions can also return `{:halt, value}` to
+  `{:error, reason}` if the operation failed. Functions can also return `{:halt, value}` to
   halt execution at any point, or a queue to run it as a child with its results stored under
   `name`. See the module documentation for the complete contract.
 
@@ -426,7 +424,7 @@ defmodule Q do
     end
 
     if MapSet.member?(queue.names, name) do
-      raise ArgumentError, "#{Kernel.inspect(name)} is already a member of the Q"
+      raise ArgumentError, "#{Kernel.inspect(name)} is already a step in this queue"
     end
 
     %{queue | operations: [op | queue.operations], names: MapSet.put(queue.names, name)}
@@ -560,7 +558,7 @@ defmodule Q do
 
   defp check_params_existence(names, keys) do
     for key <- keys, not MapSet.member?(names, key) do
-      raise ArgumentError, "The parameter #{Kernel.inspect(key)} does not exist in the queue."
+      raise ArgumentError, "param #{Kernel.inspect(key)} is not a step added before this one"
     end
 
     :ok
@@ -612,12 +610,12 @@ defmodule Q do
         run_child(name, operations, state)
 
       {:error, _name, _reason, _state} = executed ->
-        raise "expected operation `#{Kernel.inspect(name)}` to return a queue, not the result " <>
+        raise "expected step #{Kernel.inspect(name)} to return a queue, not the result " <>
                 "of executing one, got: #{Kernel.inspect(executed)}; return the queue instead " <>
                 "of executing it, so it runs as a child"
 
       other ->
-        raise "expected operation `#{Kernel.inspect(name)}` to return {:ok, value}, {:halt, value}, {:halt, value, propagate: boolean}, {:error, value}, :error or a queue, got: #{Kernel.inspect(other)}"
+        raise "expected step #{Kernel.inspect(name)} to return {:ok, value}, {:error, reason}, :error, {:halt, value}, {:halt, value, propagate: boolean} or a queue, got: #{Kernel.inspect(other)}"
     end
   end
 

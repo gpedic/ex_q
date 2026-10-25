@@ -85,7 +85,7 @@ queue do
   payment <- Payments.charge(card)
   receipt <- Receipts.create(payment)
 end
-|> Q.execute()
+|> execute()
 ```
 
 If receipt creation returns an error or raises, the payment has already happened. Applications must explicitly manage transactions or compensating actions where required; the comparison to `Ecto.Multi` describes pipeline composition, not automatic transaction behavior.
@@ -258,7 +258,7 @@ queue do
     debug(only: [selected, :approved], label: label)
   end
 end
-|> Q.execute()
+|> execute()
 
 # Prints user and approved with the label "approval".
 ```

@@ -34,7 +34,7 @@ Also new in the block:
 - Every step must have a unique name and stores its successful result, including names starting with `_`. Bare `_` bindings are rejected at compile time.
 - A step whose function returns a queue runs it as a sub-pipeline, with its results stored as a map under the step's name; `name <- queue do ... end` nests a block inline.
 - A halt stops the whole pipeline, also from inside a sub-pipeline; `{:halt, value, propagate: false}` stops only the queue the step is in.
-- Mistakes, such as binding a name twice or a malformed `if`, `unless`, `case` or `cond` (a missing `do:`, an unknown or duplicate option, no `->` clauses), are compile errors pointing at the line.
+- Mistakes, such as binding a name twice or a malformed `if`, `unless`, `case` or `cond` (a missing `do:`, an unknown or duplicate option, no `->` clauses, the wrong number of arguments), are compile errors pointing at the line.
 - The docs compare the DSL and the functional API: what each is for, and when mistakes are caught.
 
 ### Functional API
@@ -44,7 +44,7 @@ New:
 - **`let/4`**: a step for functions that can't fail. The return value is stored as is, so `let(:upper, &String.upcase/1, [:text])` needs no `{:ok, _}` wrapping.
 - **Child queues**: a `run/4` function may return a queue, which runs as a child with its result map stored under the step's name. A failing child step is reported as `{:error, step, {:error, child_step, reason, child_state}, state}`. A child's halt stops the parent too, unless it is `{:halt, value, propagate: false}`.
 - **Arity-0 steps**: pass explicit `[]` to call a function or MFA with no queue inputs. In a `queue` block, the DSL generates this list automatically.
-- **Step functions are validated when added**: an anonymous function's arity must match its params, and a `{module, function, args}` function must exist. Mistakes raise `ArgumentError` when the step is added instead of failing when the pipeline runs.
+- **Step functions are validated when added**: a function's arity must match its params, and a `{module, function, args}` function must exist. Mistakes raise `ArgumentError` when the step is added instead of failing when the pipeline runs.
 
 Breaking:
 
@@ -62,7 +62,7 @@ Breaking:
 - **A step returning a bare `:error` fails the pipeline** with `{:error, step, :error, state}`. It used to raise.
   - Upgrade: code that rescued the `RuntimeError` for such steps should match the error tuple instead.
 - **Build-time mistakes raise `ArgumentError`** instead of `RuntimeError`: a duplicate step name, or a param that refers to a step that doesn't exist.
-- **Invalid step functions raise `ArgumentError` when the step is added**, see above. A value that isn't a function or `{module, function(, args)}` raises `ArgumentError` instead of `FunctionClauseError`.
+- **Invalid step functions raise `ArgumentError` when the step is added**, see above. A value that isn't a function, `{module, function}` or `{module, function, args}` raises `ArgumentError` instead of `FunctionClauseError`.
 - **Unknown params options raise `ArgumentError`**. `{[:a], ordr: :append}` used to be ignored silently; `:order` is the only option.
 - **`:order` with a function or capture raises `ArgumentError`.** It used to be ignored: it places inputs relative to an MFA's fixed arguments, and a function receives its inputs in the order of the params list.
 - **`to_list/1` is removed from the public API**; it exposed the internal operation encoding. Use `operations/1` for a queue's step names. `Q.t()` is now an opaque type, so don't match on `%Q{}` fields.
