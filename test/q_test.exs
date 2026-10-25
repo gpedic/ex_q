@@ -58,6 +58,77 @@ defmodule QTest do
                      Q.execute(q)
                    end
     end
+
+    test "callback exceptions propagate unchanged and leave completed effects in place" do
+      original = ArgumentError.exception("raised inside a step")
+
+      for add_step <- [&Q.run/4, &Q.let/4] do
+        queue =
+          Q.new()
+          |> Q.run(
+            :effect,
+            fn ->
+              send(self(), :completed_effect)
+              {:ok, :done}
+            end,
+            []
+          )
+          |> add_step.(:raised, fn -> raise original end, [])
+          |> Q.let(:later, fn -> send(self(), :later_effect) end, [])
+
+        raised = assert_raise ArgumentError, fn -> Q.execute(queue) end
+
+        assert raised == original
+        assert_received :completed_effect
+        refute_received :later_effect
+      end
+    end
+
+    test "exceptions inside children propagate unchanged without a nested error tuple" do
+      original = RuntimeError.exception("raised inside a child")
+
+      child =
+        Q.new()
+        |> Q.let(:effect, fn -> send(self(), :child_effect) end, [])
+        |> Q.run(:raised, fn -> raise original end, [])
+        |> Q.let(:later, fn -> send(self(), :later_child_effect) end, [])
+
+      queue =
+        Q.new()
+        |> Q.run(:child, fn -> child end, [])
+        |> Q.let(:later, fn -> send(self(), :later_parent_effect) end, [])
+
+      raised = assert_raise RuntimeError, fn -> Q.execute(queue) end
+
+      assert raised == original
+      assert_received :child_effect
+      refute_received :later_child_effect
+      refute_received :later_parent_effect
+    end
+
+    test "returned errors and halts retain earlier effects and skip later operations" do
+      for {outcome, expected} <- [
+            {{:error, :offline}, {:error, :stopped, :offline, %{effect: :done}}},
+            {{:halt, :done}, {:ok, %{effect: :done, stopped: :done}}}
+          ] do
+        queue =
+          Q.new()
+          |> Q.run(
+            :effect,
+            fn ->
+              send(self(), :completed_effect)
+              {:ok, :done}
+            end,
+            []
+          )
+          |> Q.run(:stopped, fn -> outcome end, [])
+          |> Q.let(:later, fn -> send(self(), :later_effect) end, [])
+
+        assert Q.execute(queue) == expected
+        assert_received :completed_effect
+        refute_received :later_effect
+      end
+    end
   end
 
   describe "deprecated exec/1" do

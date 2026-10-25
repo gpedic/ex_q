@@ -642,9 +642,23 @@ defmodule Q.DSLTest do
     end
 
     test "the wrong number of arguments" do
-      for code <- ["if(true)", "if(true, [do: (a = 1)], :extra)", "case(:ok)", "cond()"] do
+      cases = [
+        {"if(true)", "if expects 2 arguments (an expression and a do: block), got 1"},
+        {"if(true, [do: (a = 1)], :extra)",
+         "if expects 2 arguments (an expression and a do: block), got 3"},
+        {"unless(false)", "unless expects 2 arguments (an expression and a do: block), got 1"},
+        {"unless(false, [do: (a = 1)], :extra)",
+         "unless expects 2 arguments (an expression and a do: block), got 3"},
+        {"case(:ok)", "case expects 2 arguments (an expression and a do: block), got 1"},
+        {"case(:ok, [do: nil], :extra)",
+         "case expects 2 arguments (an expression and a do: block), got 3"},
+        {"cond()", "cond expects 1 argument (a do: block), got 0"},
+        {"cond([do: nil], :extra)", "cond expects 1 argument (a do: block), got 2"}
+      ]
+
+      for {code, expected} <- cases do
         error = malformed("queue do\n  #{code}\nend")
-        assert error.description =~ "requires a do: block"
+        assert error.description == expected
         assert error.line == 3
       end
     end
@@ -664,10 +678,22 @@ defmodule Q.DSLTest do
       assert error.description ==
                "expected case clauses in the form `pattern -> steps`, got: a = 1"
 
+      assert error.line == 4
+
       error = malformed("queue do\n  cond do\n    a = 1\n  end\nend")
 
       assert error.description ==
                "expected cond clauses in the form `condition -> steps`, got: a = 1"
+
+      assert error.line == 4
+    end
+
+    test "malformed bodies without metadata use the conditional's line" do
+      for conditional <- ["case :ok", "cond"] do
+        error = malformed("queue do\n  #{conditional} do\n    true\n  end\nend")
+        assert error.description =~ "clauses in the form"
+        assert error.line == 3
+      end
     end
 
     test "an unknown case option" do

@@ -2,7 +2,7 @@ defmodule Q do
   @moduledoc """
   Build pipelines of named steps, in the spirit of `Ecto.Multi`, and run them with `execute/1`.
 
-  Every step's result is stored in a state map under the step's name. When a step fails,
+  Every step's result is stored in a state map under the step's name. When a step returns an error,
   `execute/1` returns the failing step's name and error together with the state built so far.
 
   ## Writing a pipeline
@@ -36,6 +36,14 @@ defmodule Q do
     * a queue - runs it as a child, see below
 
   Any other return value raises. A step written with `=` stores its value as is.
+
+  Exceptions raised by step functions propagate unchanged, including exceptions in child
+  queues. They aren't converted into error tuples, and Q doesn't attach accumulated state
+  to them. This applies to both `run/4` (`<-`) and `let/4` (`=`) steps.
+
+  Q does not automatically roll back completed operations. Stopping a queue after an error,
+  exception or halt leaves earlier side effects in place. Applications must manage their
+  own transaction boundaries or compensating actions where required.
 
   ## Child queues
 
@@ -228,7 +236,12 @@ defmodule Q do
   Executes the queue, running all operations in the order they were added.
 
   Each operation is provided with the state of the queue as of the start of the operation.
-  If an operation function returns an error, the execution of the queue is halted and an error is returned.
+  If an operation function returns an error, execution stops and the error tuple includes
+  the accumulated results. Exceptions propagate unchanged, including from child queues;
+  Q does not convert them into error tuples or attach accumulated results to them.
+
+  Completed side effects are not automatically rolled back after an error, exception or
+  halt. Applications must provide any required transactions or compensating actions.
 
   ## Example
       iex> Q.new()

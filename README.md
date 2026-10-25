@@ -5,11 +5,11 @@
 
 # Q
 
-Q is a tool for building and executing pipelines of operations, influenced by Ecto.Multi. It preserves all intermediate results so that you retain clarity and visibility into your data transformations at each step. When a pipeline fails, you can see precisely which step broke and what the state looked like at that point.
+Q is a tool for building and executing pipelines of operations, influenced by Ecto.Multi. It preserves intermediate results so that you retain clarity and visibility into your data transformations at each step. When a step returns an error, you can see precisely which step failed and what the state looked like at that point.
 
 ## Why Q?
 
-* **Never lose context**: like Ecto.Multi, Q returns the results of all executed steps. When a step breaks, Q returns all prior step results along with the failing step's name and error.
+* **Keep error context**: when a step returns an error, Q returns all prior step results along with the failing step's name and error. Child failures include their own intermediate results in the nested error tuple.
 
 * **Plain Elixir**: steps are written like the bindings of a `with` chain. Q works out which earlier results each step needs, so step functions don't have to be wrapped or rewritten to fit the pipeline.
 
@@ -46,7 +46,7 @@ end
 
 ## Error handling
 
-Q provides the complete context even when something fails: you know which step failed, and you have the results of every step before it.
+When a step returns an error, Q identifies the failing step and includes the results of every completed step before it.
 
 ```elixir
 def process_data(data) do
@@ -71,6 +71,22 @@ end
 ```
 
 Steps can return `{:error, reason}` or a bare `:error`, so functions like `Base.decode64/1` or `Map.fetch/2` work as steps without wrapping. A bare `:error` is reported as `{:error, step, :error, state}`.
+
+### Exceptions and side effects
+
+Exceptions raised by step functions propagate unchanged to the caller, including exceptions inside child queues. Q does not convert them into error tuples or attach accumulated results to them. This applies to both `<-` and `=` steps.
+
+Q does not automatically roll back completed operations. Stopping a queue after a returned error, raised exception or halt leaves earlier side effects in place:
+
+```elixir
+queue do
+  payment <- Payments.charge(card)
+  receipt <- Receipts.create(payment)
+end
+|> Q.execute()
+```
+
+If receipt creation returns an error or raises, the payment has already happened. Applications must explicitly manage transactions or compensating actions where required; the comparison to `Ecto.Multi` describes pipeline composition, not automatic transaction behavior.
 
 ### Without Q
 

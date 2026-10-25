@@ -196,8 +196,13 @@ defmodule Q.DSL do
     {[[do: clauses]], names}
   end
 
-  defp compile_branches(kind, _args, meta, _bound, caller) do
-    compile_error!(caller, meta, "#{kind} requires a do: block")
+  defp compile_branches(kind, args, meta, _bound, caller) do
+    expected =
+      if kind == :cond,
+        do: "1 argument (a do: block)",
+        else: "2 arguments (an expression and a do: block)"
+
+    compile_error!(caller, meta, "#{kind} expects #{expected}, got #{length(args)}")
   end
 
   defp check_options!(kind, opts, allowed, meta, caller) do
@@ -246,7 +251,7 @@ defmodule Q.DSL do
       other ->
         compile_error!(
           caller,
-          meta,
+          meta(other) ++ meta,
           "expected #{kind} clauses in the form `#{form}`, got: #{Macro.to_string(other)}"
         )
     end
