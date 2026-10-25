@@ -77,6 +77,11 @@ defmodule Q.MixProject do
         "README.md": [title: "Overview"],
         "CHANGELOG.md": [title: "Changelog"],
         LICENSE: [title: "License"]
+      ],
+      groups_for_docs: [
+        "Writing a pipeline": &(&1[:group] == "Writing a pipeline"),
+        "Functional API": &(&1[:group] == "Functional API"),
+        "Inspecting a queue": &(&1[:group] == "Inspecting a queue")
       ]
     ]
   end

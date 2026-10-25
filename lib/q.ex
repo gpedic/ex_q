@@ -120,7 +120,7 @@ defmodule Q do
   @type fun_mfa :: {module, atom, [any]} | {module, atom}
   @type params :: [name] | {[name], [order: :prepend | :append]}
   @type kind :: :put | :run | :let | :branch | :debug
-  @type exec_error :: {:error, name, any, state}
+  @type error :: {:error, name, any, state}
   @typep input :: :none | :state | {:keys, [name]}
   @typep call :: {:fun, function, input} | {:mfa, module, atom, [any], input, :prepend | :append}
   @typep operation ::
@@ -140,6 +140,7 @@ defmodule Q do
       iex> Q.new() |> Q.to_list()
       []
   """
+  @doc group: "Functional API"
   @spec new :: t
   def new do
     %Q{names: MapSet.new()}
@@ -168,6 +169,7 @@ defmodule Q do
       ...> |> Q.execute()
       {:ok, %{params: %{foo: "bar"}}}
   """
+  @doc group: "Functional API"
   @spec put(t, name, any) :: t
   def put(%Q{} = queue, name, value) do
     add_op(queue, {:step, name, :put, value})
@@ -187,6 +189,7 @@ defmodule Q do
       ...> |> Q.to_list()
       [{:put, :a}, {:debug, nil}, {:run, :b}]
   """
+  @doc group: "Inspecting a queue"
   @spec to_list(t) :: [{kind, name | nil}]
   def to_list(%Q{operations: operations}) do
     operations
@@ -210,6 +213,7 @@ defmodule Q do
       ...> |> Q.operations()
       [:init, :test]
   """
+  @doc group: "Inspecting a queue"
   @spec operations(t) :: [name]
   def operations(%Q{operations: operations}) do
     for {:step, name, _kind, _} <- Enum.reverse(operations), do: name
@@ -239,6 +243,7 @@ defmodule Q do
     follow `t:name/0`; `nil`, `true`, `false`, `:_` and non-name terms aren't selections.
 
   """
+  @doc group: "Functional API"
   @spec debug(t, Keyword.t()) :: t
   def debug(%Q{} = queue, opts \\ []) do
     add_op(queue, {:debug, validate_debug_opts!(opts)})
@@ -267,7 +272,8 @@ defmodule Q do
       ...> |> Q.execute()
       {:ok, %{write: "Hello world!"}}
   """
-  @spec execute(t) :: {:ok, state} | exec_error
+  @doc group: "Writing a pipeline"
+  @spec execute(t) :: {:ok, state} | error
   def execute(%Q{operations: operations}) do
     case run_ops(Enum.reverse(operations), %{}) do
       {:halted, state, _propagate} -> {:ok, state}
@@ -281,6 +287,7 @@ defmodule Q do
   MFA fixed arguments follow the state. Use `run/4` with `[]` for no queue inputs, or
   with a list of names to receive specific results. See `run/4` for the return contract.
   """
+  @doc group: "Functional API"
   @spec run(t, name, step_fun | fun_mfa) :: t
   def run(%Q{} = queue, name, fun) do
     add_op(queue, {:step, name, :run, resolve_call!(fun, :state, :prepend)})
@@ -331,6 +338,7 @@ defmodule Q do
       ...> |> Q.execute()
       {:ok, %{key: :b, value: 2}}
   """
+  @doc group: "Functional API"
   @spec run(t, name, step_fun | fun_mfa, params) :: t
   def run(%Q{} = queue, name, fun, params) do
     add_op(queue, {:step, name, :run, build_call!(queue, fun, params)})
@@ -342,6 +350,7 @@ defmodule Q do
   The return value is stored unchanged. MFA fixed arguments follow the state. Use
   `let/4` with `[]` for no queue inputs, or with names to receive specific results.
   """
+  @doc group: "Functional API"
   @spec let(t, name, (... -> any) | fun_mfa) :: t
   def let(%Q{} = queue, name, fun) do
     add_op(queue, {:step, name, :let, resolve_call!(fun, :state, :prepend)})
@@ -360,6 +369,7 @@ defmodule Q do
       ...> |> Q.execute()
       {:ok, %{text: "hello", upper: "HELLO"}}
   """
+  @doc group: "Functional API"
   @spec let(t, name, (... -> any) | fun_mfa, params) :: t
   def let(%Q{} = queue, name, fun, params) do
     add_op(queue, {:step, name, :let, build_call!(queue, fun, params)})
@@ -410,6 +420,7 @@ defmodule Q do
       ...> |> execute()
       {:ok, %{input: "aGVsbG8=", decoded: "hello", greeting: true}}
   """
+  @doc group: "Writing a pipeline"
   defmacro queue(do: block) do
     Q.DSL.compile(block, __CALLER__)
   end

@@ -66,7 +66,7 @@ Breaking:
 - **Unknown params options raise `ArgumentError`**. `{[:a], ordr: :append}` used to be ignored silently; `:order` is the only option.
 - **`to_list/1` returns `{kind, name}` tuples**, such as `{:run, :decoded}`, instead of the internal operation encoding. `Q.t()` is now an opaque type, so don't match on `%Q{}` fields.
 - **`operations/1` lists step names only**, without debug operations.
-- The `Q.fun_arity1()` type is removed; use `Q.step_fun()`.
+- The `Q.fun_arity1()` type is removed; use `Q.step_fun()`. The `Q.exec_error()` type is renamed to `Q.error()`, after `exec/1` became `execute/1`.
 
 ### Planned
 
