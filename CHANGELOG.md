@@ -64,6 +64,7 @@ Breaking:
 - **Build-time mistakes raise `ArgumentError`** instead of `RuntimeError`: a duplicate step name, or a param that refers to a step that doesn't exist.
 - **Invalid step functions raise `ArgumentError` when the step is added**, see above. A value that isn't a function or `{module, function(, args)}` raises `ArgumentError` instead of `FunctionClauseError`.
 - **Unknown params options raise `ArgumentError`**. `{[:a], ordr: :append}` used to be ignored silently; `:order` is the only option.
+- **`:order` with a function or capture raises `ArgumentError`.** It used to be ignored: it places inputs relative to an MFA's fixed arguments, and a function receives its inputs in the order of the params list.
 - **`to_list/1` is removed from the public API**; it exposed the internal operation encoding. Use `operations/1` for a queue's step names. `Q.t()` is now an opaque type, so don't match on `%Q{}` fields.
 - **`operations/1` lists step names only**, without debug operations.
 - The `Q.fun_arity1()` type is removed; use `Q.step_fun()`. The `Q.exec_error()` type is renamed to `Q.error()`, after `exec/1` became `execute/1`.

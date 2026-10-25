@@ -279,7 +279,7 @@ defmodule Q do
   @doc group: "Functional API"
   @spec run(t, name, step_fun | fun_mfa) :: t
   def run(%Q{} = queue, name, fun) do
-    add_op(queue, {:step, name, :run, resolve_call!(fun, :state, :prepend)})
+    add_op(queue, {:step, name, :run, resolve_call!(fun, :state, nil)})
   end
 
   @doc """
@@ -318,7 +318,8 @@ defmodule Q do
   ## Options
 
   - `:order` - for `{module, function, args}` steps, whether the values of `keys` go before
-    (`:prepend`, the default) or after (`:append`) `args`. Ignored for anonymous functions.
+    (`:prepend`, the default) or after (`:append`) `args`. Passing it with a function or
+    capture raises `ArgumentError`: a function receives its inputs in the order of `keys`.
 
   ## Example
       iex> Q.new()
@@ -342,7 +343,7 @@ defmodule Q do
   @doc group: "Functional API"
   @spec let(t, name, (... -> any) | fun_mfa) :: t
   def let(%Q{} = queue, name, fun) do
-    add_op(queue, {:step, name, :let, resolve_call!(fun, :state, :prepend)})
+    add_op(queue, {:step, name, :let, resolve_call!(fun, :state, nil)})
   end
 
   @doc """
@@ -470,24 +471,30 @@ defmodule Q do
     resolve_call!(fun, input, order)
   end
 
-  defp resolve_call!(fun, input, order) do
-    case fun do
-      fun when is_function(fun) ->
-        {:fun, fun, fun_input!(fun, input)}
+  # `order` is nil unless the :order option was given; it places the inputs relative to
+  # an MFA's fixed arguments, so a function has nothing for it to order.
+  defp resolve_call!(fun, input, nil) when is_function(fun),
+    do: {:fun, fun, fun_input!(fun, input)}
 
-      {mod, fun} when is_atom(mod) and is_atom(fun) ->
-        mfa_call!(mod, fun, [], input, order)
-
-      {mod, fun, args} when is_atom(mod) and is_atom(fun) and is_list(args) ->
-        mfa_call!(mod, fun, args, input, order)
-
-      other ->
-        raise ArgumentError,
-              "expected a function, {module, function} or {module, function, args}, got: #{Kernel.inspect(other)}"
-    end
+  defp resolve_call!(fun, _input, _order) when is_function(fun) do
+    raise ArgumentError,
+          "the :order option only applies to {module, function, args} steps; " <>
+            "a function receives its inputs in the order of its params list"
   end
 
-  defp normalize_params!(keys) when is_list(keys), do: {keys, :prepend}
+  defp resolve_call!({mod, fun}, input, order) when is_atom(mod) and is_atom(fun),
+    do: mfa_call!(mod, fun, [], input, order || :prepend)
+
+  defp resolve_call!({mod, fun, args}, input, order)
+       when is_atom(mod) and is_atom(fun) and is_list(args),
+       do: mfa_call!(mod, fun, args, input, order || :prepend)
+
+  defp resolve_call!(other, _input, _order) do
+    raise ArgumentError,
+          "expected a function, {module, function} or {module, function, args}, got: #{Kernel.inspect(other)}"
+  end
+
+  defp normalize_params!(keys) when is_list(keys), do: {keys, nil}
 
   defp normalize_params!({keys, opts}) when is_list(keys) and is_list(opts) do
     case Keyword.keys(opts) -- [:order] do
@@ -499,11 +506,14 @@ defmodule Q do
               "unknown params options #{Kernel.inspect(unknown)}, the only supported option is :order"
     end
 
-    case Keyword.get(opts, :order, :prepend) do
-      order when order in [:prepend, :append] ->
+    case Keyword.fetch(opts, :order) do
+      :error ->
+        {keys, nil}
+
+      {:ok, order} when order in [:prepend, :append] ->
         {keys, order}
 
-      order ->
+      {:ok, order} ->
         raise ArgumentError,
               "expected the :order option to be :prepend or :append, got: #{Kernel.inspect(order)}"
     end

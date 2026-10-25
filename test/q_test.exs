@@ -271,11 +271,27 @@ defmodule QTest do
       end
     end
 
-    test "anonymous functions accept {params, opts}" do
+    test "functions reject :order, which only applies to MFA fixed arguments" do
+      q = Q.new() |> Q.put(:a, 1)
+
+      for fun <- [fn a -> {:ok, a * 2} end, &TestInputs.result/1], order <- [:append, :prepend] do
+        assert_raise ArgumentError,
+                     ~r/the :order option only applies to \{module, function, args\}/,
+                     fn ->
+                       Q.run(q, :b, fun, {[:a], order: order})
+                     end
+      end
+
+      assert_raise ArgumentError, ~r/the :order option only applies/, fn ->
+        Q.let(q, :b, fn -> 2 end, {[], order: :append})
+      end
+    end
+
+    test "functions accept {params, opts} without options" do
       result =
         Q.new()
         |> Q.put(:a, 1)
-        |> Q.run(:b, fn a -> {:ok, a * 2} end, {[:a], order: :append})
+        |> Q.run(:b, fn a -> {:ok, a * 2} end, {[:a], []})
         |> Q.execute()
 
       assert {:ok, %{a: 1, b: 2}} = result
@@ -328,14 +344,15 @@ defmodule QTest do
     test "explicit empty params pass no inputs to functions and MFAs" do
       queue = Q.new() |> Q.put(:input, 7)
 
+      assert queue |> Q.run(:empty, &TestInputs.result/0, []) |> Q.execute() ==
+               {:ok, %{input: 7, empty: :no_inputs}}
+
+      assert queue |> Q.let(:empty, &TestInputs.plain/0, []) |> Q.execute() ==
+               {:ok, %{input: 7, empty: :no_inputs}}
+
+      # :order only applies to MFAs
       for params <- [[], {[], order: :prepend}, {[], order: :append}] do
-        assert queue |> Q.run(:empty, &TestInputs.result/0, params) |> Q.execute() ==
-                 {:ok, %{input: 7, empty: :no_inputs}}
-
         assert queue |> Q.run(:empty, {TestInputs, :result}, params) |> Q.execute() ==
-                 {:ok, %{input: 7, empty: :no_inputs}}
-
-        assert queue |> Q.let(:empty, &TestInputs.plain/0, params) |> Q.execute() ==
                  {:ok, %{input: 7, empty: :no_inputs}}
 
         assert queue |> Q.let(:empty, {TestInputs, :plain}, params) |> Q.execute() ==
@@ -355,14 +372,12 @@ defmodule QTest do
     end
 
     test "explicit empty params reject state callbacks rather than injecting state" do
-      for params <- [[], {[], order: :append}] do
-        assert_raise ArgumentError, ~r/expected a function of arity 0 for params \[\]/, fn ->
-          Q.run(Q.new(), :snapshot, &TestInputs.result/1, params)
-        end
+      assert_raise ArgumentError, ~r/expected a function of arity 0 for params \[\]/, fn ->
+        Q.run(Q.new(), :snapshot, &TestInputs.result/1, [])
+      end
 
-        assert_raise ArgumentError, ~r/expected a function of arity 0 for params \[\]/, fn ->
-          Q.let(Q.new(), :snapshot, &TestInputs.plain/1, params)
-        end
+      assert_raise ArgumentError, ~r/expected a function of arity 0 for params \[\]/, fn ->
+        Q.let(Q.new(), :snapshot, &TestInputs.plain/1, [])
       end
     end
 
