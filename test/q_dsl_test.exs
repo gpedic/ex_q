@@ -174,20 +174,49 @@ defmodule Q.DSLTest do
   end
 
   describe "_ bindings" do
-    test "run without being stored, and can repeat" do
+    test "underscore-prefixed bindings store their results" do
       result =
         queue do
           a = 1
-          _ = send(self(), {:ran, a})
-          _ = send(self(), :again)
-          _sent <- {:ok, :sent}
+          _sent = send(self(), {:ran, a})
+          _notified <- {:ok, :sent}
           execute()
         end
 
-      assert {:ok, %{a: 1} = state} = result
-      assert map_size(state) == 1
+      assert result == {:ok, %{a: 1, _sent: {:ran, 1}, _notified: :sent}}
       assert_received {:ran, 1}
-      assert_received :again
+    end
+
+    test "bare underscore bindings are compile errors" do
+      for binding <- ["_ = 1", "_ <- {:ok, 1}"] do
+        error = compile_error("queue do\n  #{binding}\nend")
+        assert error.description == "every step must have a name; _ cannot name a step"
+        assert error.line == 4
+      end
+    end
+
+    test "underscore-prefixed names cannot repeat or be rebound in a branch" do
+      for body <- [
+            "_sent = 1\n  _sent <- {:ok, 2}",
+            "_sent = 1\n  if true, do: _sent = 2",
+            "if true, do: _sent = 1\n  _sent = 2"
+          ] do
+        error = compile_error("queue do\n  #{body}\nend")
+        assert error.description == "_sent is already a step in this queue"
+      end
+    end
+
+    test "a branch retains underscore-prefixed results" do
+      result =
+        queue do
+          if true do
+            _approved <- {:ok, true}
+          end
+
+          execute()
+        end
+
+      assert result == {:ok, %{_approved: true}}
     end
 
     test "a failure still names the step" do
@@ -282,6 +311,177 @@ defmodule Q.DSLTest do
         end
 
       assert result == {:ok, %{cached: %{enabled: true, hit: :cached}, after_child: :ran}}
+    end
+  end
+
+  describe "debug scope and evaluation" do
+    test "nested conditionals share their enclosing queue's accumulated state" do
+      output =
+        capture_io(fn ->
+          result =
+            queue do
+              a = 1
+
+              if a == 1 do
+                b = 2
+
+                case b do
+                  2 ->
+                    c = 3
+                    debug()
+                end
+              end
+            end
+            |> execute()
+
+          assert result == {:ok, %{a: 1, b: 2, c: 3}}
+        end)
+
+      assert {%{a: 1, b: 2, c: 3}, []} = Code.eval_string(output)
+    end
+
+    test "child branches see child state, while the parent sees the completed namespace" do
+      output =
+        capture_io(fn ->
+          result =
+            queue do
+              parent = 1
+
+              child <-
+                queue do
+                  before_branch = 2
+
+                  if before_branch == 2 do
+                    inside_branch = 3
+                    debug()
+                  end
+                end
+
+              debug()
+            end
+            |> execute()
+
+          assert result ==
+                   {:ok, %{parent: 1, child: %{before_branch: 2, inside_branch: 3}}}
+        end)
+
+      [child_output, parent_output] = String.split(output, "\n", trim: true)
+      assert {%{before_branch: 2, inside_branch: 3}, []} = Code.eval_string(child_output)
+
+      assert {%{parent: 1, child: %{before_branch: 2, inside_branch: 3}}, []} =
+               Code.eval_string(parent_output)
+    end
+
+    test "options can use earlier steps and capture external variables" do
+      label = "selected"
+
+      queue =
+        queue do
+          selected = :a
+          a = 1
+          debug(only: selected, label: label)
+        end
+
+      output =
+        capture_io(fn ->
+          assert execute(queue) == {:ok, %{selected: :a, a: 1}}
+        end)
+
+      assert output == "selected: %{a: 1}\n"
+      assert Q.operations(queue) == [:selected, :a]
+      assert Q.to_list(queue) == [let: :selected, let: :a, debug: nil]
+    end
+
+    test "options are evaluated once per execution, and never while building" do
+      queue =
+        queue do
+          a = 1
+
+          debug(
+            (
+              send(self(), :debug_options_evaluated)
+              [only: :a]
+            )
+          )
+        end
+
+      refute_received :debug_options_evaluated
+
+      for _execution <- 1..2 do
+        assert capture_io(fn -> assert execute(queue) == {:ok, %{a: 1}} end) == "%{a: 1}\n"
+        assert_received :debug_options_evaluated
+        refute_received :debug_options_evaluated
+      end
+    end
+
+    test "branch options can select earlier enclosing results" do
+      label = "enclosing"
+
+      output =
+        capture_io(fn ->
+          result =
+            queue do
+              selected = :a
+              a = 1
+
+              if a == 1 do
+                debug(only: selected, label: label)
+              end
+            end
+            |> execute()
+
+          assert result == {:ok, %{selected: :a, a: 1}}
+        end)
+
+      assert output == "enclosing: %{a: 1}\n"
+    end
+
+    test "options are not evaluated after an earlier error or halt" do
+      for {outcome, expected} <- [
+            {{:error, :offline}, {:error, :stopped, :offline, %{}}},
+            {{:halt, :done}, {:ok, %{stopped: :done}}}
+          ] do
+        queue =
+          queue do
+            stopped <- outcome
+
+            debug(
+              (
+                send(self(), :unreachable_debug_options)
+                [only: :stopped]
+              )
+            )
+          end
+
+        assert capture_io(fn -> assert execute(queue) == expected end) == ""
+        refute_received :unreachable_debug_options
+      end
+    end
+
+    test "options in an untaken branch are not evaluated or validated" do
+      queue =
+        queue do
+          if false do
+            debug(send(self(), :untaken_debug_options))
+          end
+        end
+
+      assert capture_io(fn -> assert execute(queue) == {:ok, %{}} end) == ""
+      refute_received :untaken_debug_options
+    end
+
+    test "invalid deferred options are rejected only when reached" do
+      for options <- [:invalid, %{}, [only: nil], [only: [:a, [:b]]]] do
+        queue =
+          queue do
+            debug(options)
+          end
+
+        assert capture_io(fn ->
+                 error = assert_raise ArgumentError, fn -> execute(queue) end
+                 assert error.message =~ "debug"
+               end) == ""
+      end
     end
   end
 
@@ -444,7 +644,7 @@ defmodule Q.DSLTest do
     test "a bare expression" do
       error = compile_error("queue do\n  a = 1\n  IO.puts(a)\nend")
       assert error.description =~ "expected a step such as `name = expr`"
-      assert error.description =~ "use `_ = expr`"
+      assert error.description =~ "every step must have a name"
       assert error.line == 5
     end
 

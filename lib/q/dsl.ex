@@ -59,22 +59,28 @@ defmodule Q.DSL do
         queue = Q.unquote(call)(queue, unquote(name), unquote(fun), unquote(params))
       end
 
-    cond do
-      unstored?(name) ->
-        {ast, {bound, steps}}
-
-      name in bound ->
-        compile_error!(caller, meta, "#{name} is already a step in this queue")
-
-      true ->
-        {ast, {[name | bound], [name | steps]}}
+    if name in bound do
+      compile_error!(caller, meta, "#{name} is already a step in this queue")
     end
+
+    {ast, {[name | bound], [name | steps]}}
   end
 
-  defp compile_statement({:debug, _meta, args}, bound, steps, _caller) when length(args) <= 1 do
+  defp compile_statement({:debug, _meta, []}, bound, steps, _caller) do
     ast =
       quote do
-        queue = Q.debug(queue, unquote_splicing(args))
+        queue = Q.debug(queue)
+      end
+
+    {ast, {bound, steps}}
+  end
+
+  defp compile_statement({:debug, _meta, [opts]}, bound, steps, _caller) do
+    {fun, params} = step_fun(opts, steps)
+
+    ast =
+      quote do
+        queue = Q.__debug__(queue, unquote(fun), unquote(params))
       end
 
     {ast, {bound, steps}}
@@ -138,8 +144,12 @@ defmodule Q.DSL do
       caller,
       meta(statement),
       "expected a step such as `name = expr` or `name <- expr`, got: " <>
-        "#{Macro.to_string(statement)}; use `_ = expr` to run an expression without storing it"
+        "#{Macro.to_string(statement)}; every step must have a name"
     )
+  end
+
+  defp step_name!({:_, _meta, context}, _op, meta, caller) when is_atom(context) do
+    compile_error!(caller, meta, "every step must have a name; _ cannot name a step")
   end
 
   defp step_name!({name, _meta, context}, _op, _meta_op, _caller)
@@ -234,8 +244,6 @@ defmodule Q.DSL do
 
     vars |> Enum.sort() |> Enum.map(&elem(&1, 1))
   end
-
-  defp unstored?(name), do: String.starts_with?(Atom.to_string(name), "_")
 
   defp meta({_name, meta, _args}) when is_list(meta), do: meta
   defp meta(_statement), do: []

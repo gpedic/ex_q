@@ -15,7 +15,7 @@ defmodule Q do
         input = data                       # stores a value
         trimmed = String.trim(input)       # a function that can't fail
         decoded <- Base.decode64(trimmed)  # a function that can fail
-        _ <- Notifier.notify(decoded)      # runs, but isn't stored
+        notified <- Notifier.notify(decoded)
         execute()
       end
 
@@ -66,19 +66,23 @@ defmodule Q do
     * `let/4` runs a function that can't fail, like `=`.
     * `debug/2` prints the state.
 
-  Here a step function receives the values of the keys listed in its `params`. Without
-  `params` it receives the whole state, or nothing if it is an anonymous function of
-  arity 0. See `run/4` for `{module, function, args}` functions.
+  Here a step function receives the values of the keys listed in its `params`. Omitting
+  `params` passes the whole state as one argument; explicit `[]` passes no queue inputs.
+  These rules apply to both functions and MFAs. See `run/4` for `{module, function, args}`.
 
-  Steps named with an atom starting with `_`, such as `:_notified`, run but their result
-  isn't stored, and the name doesn't have to be unique. A failure still reports the name.
+  Every step has a unique name and stores its successful result. Names are atoms, such as
+  `:user`, or tuples, such as `{:invite, user_id}`. The atoms `nil`, `true`, `false` and `:_`
+  are not allowed. Names starting with `_`, such as `:_notified`, follow the same rules.
   """
 
   alias __MODULE__
   defstruct operations: [], names: MapSet.new()
   @opaque t :: %__MODULE__{operations: [operation], names: MapSet.t()}
   @type state :: map
-  @type name :: any
+  @typedoc """
+  An atom or tuple identifying a step. The atoms `nil`, `true`, `false` and `:_` are excluded.
+  """
+  @type name :: atom | tuple
   @type result ::
           {:ok, any}
           | {:error, any}
@@ -98,6 +102,7 @@ defmodule Q do
            | {:step, name, :run | :let, call}
            | {:branch, call}
            | {:debug, Keyword.t()}
+           | {:debug, {:deferred, call}}
 
   @doc """
   Creates and returns a new, empty `Q` struct.
@@ -124,12 +129,12 @@ defmodule Q do
   ## Params
 
   - `queue`: The queue to add the value to.
-  - `name`: The name to associate with the value. It must be unique, or an error will be raised.
+  - `name`: A unique atom or tuple to associate with the value. See `t:name/0` for exclusions.
   - `value`: The value to add to the queue.
 
   ## Errors
 
-  Raises `ArgumentError` if `name` is already present in the queue.
+  Raises `ArgumentError` if `name` is invalid or is already present in the queue.
 
   ## Example
       iex> Q.new()
@@ -187,18 +192,36 @@ defmodule Q do
   @doc """
   Adds an operation to the queue that, when executed, prints the current state of the queue.
 
-  The printing is performed using Elixir's `IO.inspect/2`, which provides a human-readable
-  representation of the queue's state.
+  Inline conditionals share their enclosing queue's accumulated state. Named child queues
+  have their own state. Printing or filtering never changes the pipeline's results.
+
+  The printing is performed using Elixir's `IO.inspect/2`. The Q-specific `:only` option
+  selects one valid step name or a list of names; `only: []` prints an empty map. Valid
+  names that aren't present are omitted. Remaining options, such as `:label`, are passed
+  to `IO.inspect/2` after removing `:only`.
+
+  In a `queue/1` block, options are evaluated once whenever execution reaches the debug
+  statement, can reference earlier steps, and aren't evaluated in skipped branches or
+  after an error or halt. Functional options are validated when added with `debug/2`;
+  DSL options are validated when evaluated. Invalid options or selections raise
+  `ArgumentError`.
 
   ## Params
 
   - `queue`: The queue to debug.
-  - `opts`: Options passed to `IO.inspect/2`. If the `:only` option is provided, only those keys will be printed.
+  - `opts`: A keyword list of inspection options and optional `:only` selection. Step names
+    follow `t:name/0`; `nil`, `true`, `false`, `:_` and non-name terms aren't selections.
 
   """
   @spec debug(t, Keyword.t()) :: t
   def debug(%Q{} = queue, opts \\ []) do
-    add_op(queue, {:debug, opts})
+    add_op(queue, {:debug, validate_debug_opts!(opts)})
+  end
+
+  # The DSL evaluates the options expression only when this operation is reached.
+  @doc false
+  def __debug__(%Q{} = queue, fun, params) do
+    add_op(queue, {:debug, {:deferred, build_call!(queue, fun, params)}})
   end
 
   @doc """
@@ -229,6 +252,17 @@ defmodule Q do
   def exec(queue), do: execute(queue)
 
   @doc """
+  Adds a step whose function receives the whole accumulated state as one argument.
+
+  MFA fixed arguments follow the state. Use `run/4` with `[]` for no queue inputs, or
+  with a list of names to receive specific results. See `run/4` for the return contract.
+  """
+  @spec run(t, name, step_fun | fun_mfa) :: t
+  def run(%Q{} = queue, name, fun) do
+    add_op(queue, {:step, name, :run, resolve_call!(fun, :state, :prepend)})
+  end
+
+  @doc """
   Adds a function to be executed as part of the queue.
 
   This function enables adding operations to the queue that are executed when `execute/1` is called.
@@ -242,18 +276,21 @@ defmodule Q do
   ## Params
 
   - `queue`: The queue to which the function should be added.
-  - `name`: A unique name for this operation. It will be used as a key in the queue's internal state.
+  - `name`: A unique atom or tuple for this operation, used as a key in the state. See `t:name/0` for exclusions.
   - `fun`: The function to be run. It can be an anonymous function, a `{module, function}` tuple
     or a `{module, function, args}` tuple.
   - `params` (optional): A list of keys in the queue's internal state that should be passed to the
-    function as arguments, or a `{keys, opts}` tuple.
+    function as arguments, or a `{keys, opts}` tuple. Omitting it passes the whole state;
+    explicit `[]` passes no queue inputs.
 
   ## Function input
 
-  - With `params`, the function receives the values of those keys, in order.
-  - Without `params`, it receives the whole state, or no arguments if it is an anonymous function
-    of arity 0.
-  - `{module, function, args}` functions receive `args` as well; see the `:order` option.
+  - Without `params`, the function receives the whole state as one argument.
+  - With `[]` (or `{[], opts}`), no queue inputs are passed.
+  - With named `params`, the function receives the values of those keys, in order.
+  - These rules apply to both functions and MFAs. `{module, function, args}` functions
+    receive `args` as well; see the `:order` option. With `[]`, only these fixed arguments
+    are passed.
 
   The function's arity is checked when the step is added, and `ArgumentError` is raised if it
   doesn't match, or if a module function doesn't exist.
@@ -271,8 +308,19 @@ defmodule Q do
       {:ok, %{key: :b, value: 2}}
   """
   @spec run(t, name, step_fun | fun_mfa, params) :: t
-  def run(%Q{} = queue, name, fun, params \\ []) do
+  def run(%Q{} = queue, name, fun, params) do
     add_op(queue, {:step, name, :run, build_call!(queue, fun, params)})
+  end
+
+  @doc """
+  Adds a plain-value step whose function receives the whole accumulated state.
+
+  The return value is stored unchanged. MFA fixed arguments follow the state. Use
+  `let/4` with `[]` for no queue inputs, or with names to receive specific results.
+  """
+  @spec let(t, name, (... -> any) | fun_mfa) :: t
+  def let(%Q{} = queue, name, fun) do
+    add_op(queue, {:step, name, :let, resolve_call!(fun, :state, :prepend)})
   end
 
   @doc """
@@ -289,7 +337,7 @@ defmodule Q do
       {:ok, %{text: "hello", upper: "HELLO"}}
   """
   @spec let(t, name, (... -> any) | fun_mfa, params) :: t
-  def let(%Q{} = queue, name, fun, params \\ []) do
+  def let(%Q{} = queue, name, fun, params) do
     add_op(queue, {:step, name, :let, build_call!(queue, fun, params)})
   end
 
@@ -318,8 +366,8 @@ defmodule Q do
 
     * The step is named after the variable, and its inputs are the earlier steps `expr`
       uses. Other variables are captured as in any closure.
-    * The left side is a single variable, and a name is bound once. Names starting with `_`
-      run without being stored, and can repeat.
+    * The left side is a single named variable, and a name is bound once. Every successful
+      result is stored, including names starting with `_`. Bare `_` is not allowed.
     * A step bound inside a branch is in the result, but can't be used after the conditional.
     * A `<-` step whose expression returns a queue runs it as a child, and stores the child's
       results as a map under the step's name. `name <- queue do ... end` nests a block inline.
@@ -342,17 +390,16 @@ defmodule Q do
     Q.DSL.compile(block, __CALLER__)
   end
 
-  defp add_op(%Q{} = queue, {:step, name, _kind, _} = op) do
-    if unstored?(name) do
-      %{queue | operations: [op | queue.operations]}
-    else
-      add_named_op(queue, name, op)
-    end
+  defp add_op(%Q{}, {:step, :_, _kind, _}) do
+    raise ArgumentError, "every step must have a name; _ cannot name a step"
   end
 
-  defp add_op(%Q{} = queue, op), do: %{queue | operations: [op | queue.operations]}
+  defp add_op(%Q{} = queue, {:step, name, _kind, _} = op) do
+    unless valid_name?(name) do
+      raise ArgumentError,
+            "expected a step name to be an atom other than nil, true, false or :_, or a tuple, got: #{Kernel.inspect(name)}"
+    end
 
-  defp add_named_op(queue, name, op) do
     if MapSet.member?(queue.names, name) do
       raise ArgumentError, "#{Kernel.inspect(name)} is already a member of the Q"
     end
@@ -360,23 +407,55 @@ defmodule Q do
     %{queue | operations: [op | queue.operations], names: MapSet.put(queue.names, name)}
   end
 
-  defp unstored?(name), do: is_atom(name) and String.starts_with?(Atom.to_string(name), "_")
+  defp add_op(%Q{} = queue, op), do: %{queue | operations: [op | queue.operations]}
+
+  defp valid_name?(name),
+    do: (is_atom(name) and name not in [nil, true, false, :_]) or is_tuple(name)
+
+  defp validate_debug_opts!(opts) do
+    unless Keyword.keyword?(opts) do
+      raise ArgumentError, "debug options must be a keyword list, got: #{Kernel.inspect(opts)}"
+    end
+
+    case Keyword.fetch(opts, :only) do
+      :error ->
+        :ok
+
+      {:ok, selection} ->
+        keys = if is_list(selection), do: selection, else: [selection]
+
+        unless valid_debug_keys?(keys) do
+          raise ArgumentError,
+                "debug :only must be a valid step name or a list of valid step names, got: #{Kernel.inspect(selection)}"
+        end
+    end
+
+    opts
+  end
+
+  defp valid_debug_keys?([]), do: true
+  defp valid_debug_keys?([name | rest]), do: valid_name?(name) and valid_debug_keys?(rest)
+  defp valid_debug_keys?(_other), do: false
 
   # Resolves a step function and its params into a call, so that mistakes are
   # caught when the step is added rather than when the queue runs.
   defp build_call!(%Q{names: names}, fun, params) do
     {keys, order} = normalize_params!(params)
     check_params_existence(names, keys)
+    input = if keys == [], do: :none, else: {:keys, keys}
+    resolve_call!(fun, input, order)
+  end
 
+  defp resolve_call!(fun, input, order) do
     case fun do
       fun when is_function(fun) ->
-        {:fun, fun, fun_input!(fun, keys)}
+        {:fun, fun, fun_input!(fun, input)}
 
       {mod, fun} when is_atom(mod) and is_atom(fun) ->
-        mfa_call!(mod, fun, [], keys, order)
+        mfa_call!(mod, fun, [], input, order)
 
       {mod, fun, args} when is_atom(mod) and is_atom(fun) and is_list(args) ->
-        mfa_call!(mod, fun, args, keys, order)
+        mfa_call!(mod, fun, args, input, order)
 
       other ->
         raise ArgumentError,
@@ -411,33 +490,31 @@ defmodule Q do
           "expected params to be a list of names or a {names, opts} tuple, got: #{Kernel.inspect(params)}"
   end
 
-  defp fun_input!(fun, keys) do
+  defp fun_input!(fun, input) do
     {:arity, arity} = Function.info(fun, :arity)
+    expected = input_arity(input)
 
-    case {keys, arity} do
-      {[], 0} ->
-        :none
+    if arity != expected do
+      context =
+        case input do
+          :state -> "to receive the whole state (pass [] for no queue inputs)"
+          :none -> "for params []"
+          {:keys, keys} -> "for params #{Kernel.inspect(keys)}"
+        end
 
-      {[], 1} ->
-        :state
-
-      {[], _} ->
-        raise ArgumentError,
-              "expected a function of arity 0, or 1 to receive the state, got a function of arity #{arity}"
-
-      {keys, arity} when length(keys) == arity ->
-        {:keys, keys}
-
-      {keys, _} ->
-        raise ArgumentError,
-              "expected a function of arity #{length(keys)} for params #{Kernel.inspect(keys)}, " <>
-                "got a function of arity #{arity}"
+      raise ArgumentError,
+            "expected a function of arity #{expected} #{context}, got a function of arity #{arity}"
     end
+
+    input
   end
 
-  defp mfa_call!(mod, fun, args, keys, order) do
-    {input, input_arity} = if keys == [], do: {:state, 1}, else: {{:keys, keys}, length(keys)}
-    arity = input_arity + length(args)
+  defp input_arity(:none), do: 0
+  defp input_arity(:state), do: 1
+  defp input_arity({:keys, keys}), do: length(keys)
+
+  defp mfa_call!(mod, fun, args, input, order) do
+    arity = input_arity(input) + length(args)
     Code.ensure_loaded(mod)
 
     if not function_exported?(mod, fun, arity) do
@@ -457,17 +534,10 @@ defmodule Q do
 
   defp run_ops(ops, state), do: Enum.reduce_while(ops, {:ok, state}, &run_op/2)
 
-  defp run_op({:debug, opts}, {:ok, state}) do
-    if opts[:only] do
-      # credo:disable-for-next-line Credo.Check.Warning.IoInspect
-      state |> Map.take(List.wrap(opts[:only])) |> IO.inspect(opts)
-    else
-      # credo:disable-for-next-line Credo.Check.Warning.IoInspect
-      IO.inspect(state, opts)
-    end
+  defp run_op({:debug, {:deferred, call}}, {:ok, state}),
+    do: print_debug(state, validate_debug_opts!(call(call, state)))
 
-    {:cont, {:ok, state}}
-  end
+  defp run_op({:debug, opts}, {:ok, state}), do: print_debug(state, opts)
 
   defp run_op({:step, name, :put, value}, {:ok, state}) do
     {:cont, {:ok, store!(state, name, value)}}
@@ -477,20 +547,13 @@ defmodule Q do
     {:cont, {:ok, store!(state, name, call(call, state))}}
   end
 
-  # The branch taken is the enclosing queue's scope: its results are spliced into
-  # the state, and a halt in it stops the enclosing queue.
+  # A branch shares its enclosing queue's state, including earlier results.
   defp run_op({:branch, call}, {:ok, state}) do
     %Q{operations: operations} = call(call, state)
 
-    case run_ops(Enum.reverse(operations), %{}) do
-      {:ok, branch} ->
-        {:cont, {:ok, merge_state!(state, branch)}}
-
-      {:halted, branch, propagate} ->
-        {:halt, {:halted, merge_state!(state, branch), propagate}}
-
-      {:error, name, reason, branch} ->
-        {:halt, {:error, name, reason, merge_state!(state, branch)}}
+    case run_ops(Enum.reverse(operations), state) do
+      {:ok, _state} = result -> {:cont, result}
+      result -> {:halt, result}
     end
   end
 
@@ -553,23 +616,24 @@ defmodule Q do
   # Names are unique within a queue and the compiler rejects duplicates across
   # branches, so a clash here means a branch function was built by hand.
   defp store!(state, name, value) do
-    cond do
-      unstored?(name) ->
-        state
-
-      Map.has_key?(state, name) ->
-        raise ArgumentError,
-              "step #{Kernel.inspect(name)} conflicts with a step of the same name from a branch"
-
-      true ->
-        Map.put(state, name, value)
+    if Map.has_key?(state, name) do
+      raise ArgumentError,
+            "step #{Kernel.inspect(name)} conflicts with a step of the same name from a branch"
     end
+
+    Map.put(state, name, value)
   end
 
-  defp merge_state!(state, branch) do
-    Map.merge(state, branch, fn name, _, _ ->
-      raise ArgumentError,
-            "step #{Kernel.inspect(name)} from a branch conflicts with a step of the same name"
-    end)
+  defp print_debug(state, opts) do
+    selected =
+      case Keyword.fetch(opts, :only) do
+        :error -> state
+        {:ok, keys} when is_list(keys) -> Map.take(state, keys)
+        {:ok, key} -> Map.take(state, [key])
+      end
+
+    # credo:disable-for-next-line Credo.Check.Warning.IoInspect
+    IO.inspect(selected, Keyword.delete(opts, :only))
+    {:cont, {:ok, state}}
   end
 end

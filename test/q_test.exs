@@ -27,6 +27,15 @@ defmodule QTest do
     end
   end
 
+  defmodule TestInputs do
+    def result, do: {:ok, :no_inputs}
+    def result(state), do: {:ok, state}
+    def plain, do: :no_inputs
+    def plain(state), do: state
+    def with_options(state, options), do: {:ok, {state, options}}
+    def arguments(first, second, third), do: {:ok, {first, second, third}}
+  end
+
   describe "new/0" do
     test "creating the basic struct" do
       assert %Q{names: _, operations: []} = Q.new()
@@ -58,8 +67,8 @@ defmodule QTest do
       queues = [
         Q.new(),
         Q.new() |> Q.put(:value, 1),
-        Q.new() |> Q.run(:failed, fn -> {:error, :offline} end),
-        Q.new() |> Q.run(:stopped, fn -> {:halt, :done} end)
+        Q.new() |> Q.run(:failed, fn -> {:error, :offline} end, []),
+        Q.new() |> Q.run(:stopped, fn -> {:halt, :done} end, [])
       ]
 
       for queue <- queues do
@@ -106,10 +115,10 @@ defmodule QTest do
       assert {:ok, %{init: :test, read: "hello world", write: "HELLO WORLD"}} = result
     end
 
-    test "an arity-0 function without params is called with no arguments" do
+    test "an arity-0 function with explicit [] is called with no arguments" do
       assert {:ok, %{answer: 42}} =
                Q.new()
-               |> Q.run(:answer, fn -> {:ok, 42} end)
+               |> Q.run(:answer, fn -> {:ok, 42} end, [])
                |> Q.execute()
     end
 
@@ -118,9 +127,11 @@ defmodule QTest do
         Q.new() |> Q.put(:a, 1) |> Q.run(:b, fn -> {:ok, 2} end, [:a])
       end
 
-      assert_raise ArgumentError, ~r/expected a function of arity 0, or 1/, fn ->
-        Q.new() |> Q.run(:b, fn _, _ -> {:ok, 2} end)
-      end
+      assert_raise ArgumentError,
+                   ~r/expected a function of arity 1 to receive the whole state/,
+                   fn ->
+                     Q.new() |> Q.run(:b, fn _, _ -> {:ok, 2} end)
+                   end
     end
 
     test "an MFA that doesn't exist raises when added" do
@@ -229,6 +240,121 @@ defmodule QTest do
     end
   end
 
+  describe "queue inputs" do
+    test "omitted params pass the accumulated state to functions and MFAs" do
+      queue = Q.new() |> Q.put(:input, 7)
+
+      assert queue |> Q.run(:snapshot, &TestInputs.result/1) |> Q.execute() ==
+               {:ok, %{input: 7, snapshot: %{input: 7}}}
+
+      assert queue |> Q.run(:snapshot, {TestInputs, :result}) |> Q.execute() ==
+               {:ok, %{input: 7, snapshot: %{input: 7}}}
+
+      assert queue |> Q.let(:snapshot, &TestInputs.plain/1) |> Q.execute() ==
+               {:ok, %{input: 7, snapshot: %{input: 7}}}
+
+      assert queue |> Q.let(:snapshot, {TestInputs, :plain}) |> Q.execute() ==
+               {:ok, %{input: 7, snapshot: %{input: 7}}}
+    end
+
+    test "explicit empty params pass no inputs to functions and MFAs" do
+      queue = Q.new() |> Q.put(:input, 7)
+
+      for params <- [[], {[], order: :prepend}, {[], order: :append}] do
+        assert queue |> Q.run(:empty, &TestInputs.result/0, params) |> Q.execute() ==
+                 {:ok, %{input: 7, empty: :no_inputs}}
+
+        assert queue |> Q.run(:empty, {TestInputs, :result}, params) |> Q.execute() ==
+                 {:ok, %{input: 7, empty: :no_inputs}}
+
+        assert queue |> Q.let(:empty, &TestInputs.plain/0, params) |> Q.execute() ==
+                 {:ok, %{input: 7, empty: :no_inputs}}
+
+        assert queue |> Q.let(:empty, {TestInputs, :plain}, params) |> Q.execute() ==
+                 {:ok, %{input: 7, empty: :no_inputs}}
+      end
+    end
+
+    test "omitted params reject zero-arity functions with an explicit-empty hint" do
+      for build <- [
+            fn -> Q.run(Q.new(), :empty, &TestInputs.result/0) end,
+            fn -> Q.let(Q.new(), :empty, &TestInputs.plain/0) end
+          ] do
+        error = assert_raise ArgumentError, build
+        assert error.message =~ "expected a function of arity 1 to receive the whole state"
+        assert error.message =~ "pass [] for no queue inputs"
+      end
+    end
+
+    test "explicit empty params reject state callbacks rather than injecting state" do
+      for params <- [[], {[], order: :append}] do
+        assert_raise ArgumentError, ~r/expected a function of arity 0 for params \[\]/, fn ->
+          Q.run(Q.new(), :snapshot, &TestInputs.result/1, params)
+        end
+
+        assert_raise ArgumentError, ~r/expected a function of arity 0 for params \[\]/, fn ->
+          Q.let(Q.new(), :snapshot, &TestInputs.plain/1, params)
+        end
+      end
+    end
+
+    test "MFA validation uses the declared input count" do
+      assert_raise ArgumentError, ~r/System.version\/1 is undefined or private/, fn ->
+        Q.let(Q.new(), :version, {System, :version})
+      end
+
+      assert_raise ArgumentError, ~r/Map.keys\/0 is undefined or private/, fn ->
+        Q.let(Q.new(), :keys, {Map, :keys}, [])
+      end
+
+      assert {:ok, %{version: version}} =
+               Q.new() |> Q.let(:version, {System, :version}, []) |> Q.execute()
+
+      assert version == System.version()
+    end
+
+    test "MFA fixed arguments are added to the declared inputs" do
+      queue = Q.new() |> Q.put(:input, 7)
+      options = [strict: true]
+
+      assert queue
+             |> Q.run(:snapshot, {TestInputs, :with_options, [options]})
+             |> Q.execute() == {:ok, %{input: 7, snapshot: {%{input: 7}, options}}}
+
+      for params <- [[], {[], order: :prepend}, {[], order: :append}] do
+        assert queue
+               |> Q.run(:fixed, {TestInputs, :with_options, [:value, options]}, params)
+               |> Q.execute() == {:ok, %{input: 7, fixed: {:value, options}}}
+      end
+    end
+
+    test "named dependencies retain their order alongside fixed MFA arguments" do
+      queue = Q.new() |> Q.put(:first, 1) |> Q.put(:second, 2)
+      options = [strict: true]
+
+      result =
+        queue
+        |> Q.run(:prepend, {TestInputs, :arguments, [options]}, [:second, :first])
+        |> Q.run(
+          :append,
+          {TestInputs, :arguments, [options]},
+          {[:second, :first], order: :append}
+        )
+        |> Q.run(:capture, &TestInputs.arguments(&1, &2, options), [:second, :first])
+        |> Q.execute()
+
+      assert result ==
+               {:ok,
+                %{
+                  first: 1,
+                  second: 2,
+                  prepend: {2, 1, options},
+                  append: {options, 2, 1},
+                  capture: {2, 1, options}
+                }}
+    end
+  end
+
   test "results are aggregated" do
     result =
       Q.new()
@@ -273,44 +399,148 @@ defmodule QTest do
     refute Map.has_key?(output, :write)
   end
 
-  describe "names starting with _" do
-    test "run but aren't stored, and can repeat" do
+  describe "step names" do
+    test "invalid names are rejected by every step builder" do
+      invalid_names = [
+        [],
+        [:a, :b],
+        [name: :a],
+        "user",
+        1,
+        1.5,
+        %{},
+        MapSet.new(),
+        self(),
+        make_ref(),
+        fn -> :name end,
+        nil,
+        true,
+        false
+      ]
+
+      for name <- invalid_names do
+        builders = [
+          fn -> Q.put(Q.new(), name, :value) end,
+          fn -> Q.run(Q.new(), name, fn -> {:ok, :value} end, []) end,
+          fn -> Q.let(Q.new(), name, fn -> :value end, []) end
+        ]
+
+        for build <- builders do
+          assert_raise ArgumentError, ~r/expected a step name to be an atom .* or a tuple/, build
+        end
+      end
+    end
+
+    test "tuple names work as result keys, dependencies and operation names" do
+      queue =
+        Q.new()
+        |> Q.put({:input, 7}, 2)
+        |> Q.run({:double, 7}, fn n -> {:ok, n * 2} end, [{:input, 7}])
+        |> Q.let(:summary, &Integer.to_string/1, [{:double, 7}])
+
+      assert Q.execute(queue) ==
+               {:ok, %{{:input, 7} => 2, {:double, 7} => 4, :summary => "4"}}
+
+      assert Q.operations(queue) == [{:input, 7}, {:double, 7}, :summary]
+      assert Q.to_list(queue) == [put: {:input, 7}, run: {:double, 7}, let: :summary]
+
+      assert_raise ArgumentError, ~r/is already a member/, fn ->
+        Q.run(queue, {:input, 7}, fn -> {:ok, :duplicate} end, [])
+      end
+    end
+
+    test "tuple names work with MFA steps and are preserved in failures" do
       result =
         Q.new()
-        |> Q.put(:a, 1)
+        |> Q.put(:key, :a)
+        |> Q.run({:fetch, 7}, {Map, :fetch, [%{a: 1}]}, {[:key], order: :append})
+        |> Q.run({:charge, 7}, fn -> {:error, :declined} end, [])
+        |> Q.execute()
+
+      assert result ==
+               {:error, {:charge, 7}, :declined, %{{:fetch, 7} => 1, :key => :a}}
+    end
+
+    test "debug can select a tuple-named step" do
+      output =
+        capture_io(fn ->
+          Q.new()
+          |> Q.put({:invite, 7}, :sent)
+          |> Q.put(:other, :unrelated)
+          |> Q.debug(only: {:invite, 7})
+          |> Q.execute()
+        end)
+
+      assert output == "%{{:invite, 7} => :sent}\n"
+    end
+  end
+
+  describe "names starting with _" do
+    test "successful results are stored for put, run, let and halt" do
+      result =
+        Q.new()
+        |> Q.put(:_input, 1)
         |> Q.run(
-          :_,
+          :_sent,
           fn a ->
             send(self(), {:ran, a})
             {:ok, :sent}
           end,
-          [:a]
+          [:_input]
         )
-        |> Q.let(:_, fn -> :ignored end)
-        |> Q.let(:_logged, fn -> :ignored end)
+        |> Q.let(:_logged, fn -> :logged end, [])
+        |> Q.run(:_stop, fn -> {:halt, :done} end, [])
         |> Q.execute()
 
-      assert {:ok, %{a: 1} = state} = result
-      assert map_size(state) == 1
+      assert result == {:ok, %{_input: 1, _sent: :sent, _logged: :logged, _stop: :done}}
       assert_received {:ran, 1}
+    end
+
+    test "bare underscore names are rejected when added" do
+      builders = [
+        fn -> Q.put(Q.new(), :_, :value) end,
+        fn -> Q.run(Q.new(), :_, fn -> {:ok, :value} end, []) end,
+        fn -> Q.let(Q.new(), :_, fn -> :value end, []) end
+      ]
+
+      for build <- builders do
+        assert_raise ArgumentError, "every step must have a name; _ cannot name a step", build
+      end
+    end
+
+    test "underscore-prefixed names must be unique across operation kinds" do
+      queue = Q.new() |> Q.put(:_step, 1)
+
+      builders = [
+        fn -> Q.put(queue, :_step, 2) end,
+        fn -> Q.run(queue, :_step, fn -> {:ok, 2} end, []) end,
+        fn -> Q.let(queue, :_step, fn -> 2 end, []) end
+      ]
+
+      for build <- builders do
+        assert_raise ArgumentError, ~r/:_step is already a member/, build
+      end
     end
 
     test "a failure still names the step" do
       result =
         Q.new()
         |> Q.put(:a, 1)
-        |> Q.run(:_notified, fn -> {:error, :offline} end)
+        |> Q.run(:_notified, fn -> {:error, :offline} end, [])
         |> Q.execute()
 
       assert {:error, :_notified, :offline, %{a: 1}} = result
     end
 
-    test "can't be used as params" do
-      assert_raise ArgumentError, ~r/The parameter :_x does not exist/, fn ->
+    test "can be used as params and are listed as ordinary steps" do
+      queue =
         Q.new()
-        |> Q.let(:_x, fn -> 1 end)
+        |> Q.let(:_x, fn -> 1 end, [])
         |> Q.let(:y, & &1, [:_x])
-      end
+
+      assert Q.execute(queue) == {:ok, %{_x: 1, y: 1}}
+      assert Q.operations(queue) == [:_x, :y]
+      assert Q.to_list(queue) == [let: :_x, let: :y]
     end
   end
 
@@ -330,7 +560,7 @@ defmodule QTest do
     test "a tuple return value is stored, not interpreted" do
       assert {:ok, %{pair: {:error, :not_a_failure}}} =
                Q.new()
-               |> Q.let(:pair, fn -> {:error, :not_a_failure} end)
+               |> Q.let(:pair, fn -> {:error, :not_a_failure} end, [])
                |> Q.execute()
     end
   end
@@ -339,13 +569,13 @@ defmodule QTest do
     defp billing(user) do
       Q.new()
       |> Q.put(:validated, user)
-      |> Q.let(:invoice, fn -> {:invoice, user.id} end)
+      |> Q.let(:invoice, fn -> {:invoice, user.id} end, [])
     end
 
     defp shipping(user) do
       Q.new()
       |> Q.put(:validated, user)
-      |> Q.let(:tracking, fn -> {:tracking, user.id} end)
+      |> Q.let(:tracking, fn -> {:tracking, user.id} end, [])
     end
 
     test "a step returning a queue runs it and stores its results under the step's name" do
@@ -368,14 +598,15 @@ defmodule QTest do
     end
 
     test "an empty child stores an empty map" do
-      assert Q.new() |> Q.run(:child, fn -> Q.new() end) |> Q.execute() == {:ok, %{child: %{}}}
+      assert Q.new() |> Q.run(:child, fn -> Q.new() end, []) |> Q.execute() ==
+               {:ok, %{child: %{}}}
     end
 
     test "{:ok, queue} and let store a queue without running it" do
       assert {:ok, %{a: a, b: b}} =
                Q.new()
-               |> Q.run(:a, fn -> {:ok, billing(%{id: 1})} end)
-               |> Q.let(:b, fn -> billing(%{id: 1}) end)
+               |> Q.run(:a, fn -> {:ok, billing(%{id: 1})} end, [])
+               |> Q.let(:b, fn -> billing(%{id: 1}) end, [])
                |> Q.execute()
 
       assert [put: :validated, let: :invoice] = Q.to_list(a)
@@ -386,12 +617,16 @@ defmodule QTest do
       result =
         Q.new()
         |> Q.put(:user, %{id: 7})
-        |> Q.run(:billing, fn ->
-          Q.new()
-          |> Q.put(:validated, true)
-          |> Q.run(:charge, fn -> {:error, :declined} end)
-        end)
-        |> Q.run(:never, fn -> {:ok, :should_not_run} end)
+        |> Q.run(
+          :billing,
+          fn ->
+            Q.new()
+            |> Q.put(:validated, true)
+            |> Q.run(:charge, fn -> {:error, :declined} end, [])
+          end,
+          []
+        )
+        |> Q.run(:never, fn -> {:ok, :should_not_run} end, [])
         |> Q.execute()
 
       assert result ==
@@ -402,15 +637,23 @@ defmodule QTest do
     test "nested failures nest their error tuples" do
       result =
         Q.new()
-        |> Q.run(:outer, fn ->
-          Q.new()
-          |> Q.put(:a, 1)
-          |> Q.run(:middle, fn ->
+        |> Q.run(
+          :outer,
+          fn ->
             Q.new()
-            |> Q.put(:b, 2)
-            |> Q.run(:inner, fn -> {:error, :deep} end)
-          end)
-        end)
+            |> Q.put(:a, 1)
+            |> Q.run(
+              :middle,
+              fn ->
+                Q.new()
+                |> Q.put(:b, 2)
+                |> Q.run(:inner, fn -> {:error, :deep} end, [])
+              end,
+              []
+            )
+          end,
+          []
+        )
         |> Q.execute()
 
       assert result ==
@@ -421,17 +664,25 @@ defmodule QTest do
       result =
         Q.new()
         |> Q.put(:top, 0)
-        |> Q.run(:outer, fn ->
-          Q.new()
-          |> Q.put(:a, 1)
-          |> Q.run(:middle, fn ->
+        |> Q.run(
+          :outer,
+          fn ->
             Q.new()
-            |> Q.put(:b, 2)
-            |> Q.run(:stop, fn -> {:halt, :early} end)
-            |> Q.put(:never, :inner)
-          end)
-          |> Q.put(:never, :outer)
-        end)
+            |> Q.put(:a, 1)
+            |> Q.run(
+              :middle,
+              fn ->
+                Q.new()
+                |> Q.put(:b, 2)
+                |> Q.run(:stop, fn -> {:halt, :early} end, [])
+                |> Q.put(:never, :inner)
+              end,
+              []
+            )
+            |> Q.put(:never, :outer)
+          end,
+          []
+        )
         |> Q.put(:never, :top)
         |> Q.execute()
 
@@ -441,11 +692,15 @@ defmodule QTest do
     test "a halt with propagate: false stops only the child" do
       result =
         Q.new()
-        |> Q.run(:cache, fn ->
-          Q.new()
-          |> Q.run(:lookup, fn -> {:halt, :hit, propagate: false} end)
-          |> Q.put(:never, true)
-        end)
+        |> Q.run(
+          :cache,
+          fn ->
+            Q.new()
+            |> Q.run(:lookup, fn -> {:halt, :hit, propagate: false} end, [])
+            |> Q.put(:never, true)
+          end,
+          []
+        )
         |> Q.put(:after_cache, true)
         |> Q.execute()
 
@@ -455,16 +710,24 @@ defmodule QTest do
     test "a local halt in a grandchild allows both ancestors to continue" do
       result =
         Q.new()
-        |> Q.run(:child, fn ->
-          Q.new()
-          |> Q.run(:grandchild, fn ->
+        |> Q.run(
+          :child,
+          fn ->
             Q.new()
-            |> Q.put(:before_halt, true)
-            |> Q.run(:stop, fn -> {:halt, :done, propagate: false} end)
-            |> Q.let(:never, fn -> raise "grandchild must stop" end)
-          end)
-          |> Q.put(:after_grandchild, true)
-        end)
+            |> Q.run(
+              :grandchild,
+              fn ->
+                Q.new()
+                |> Q.put(:before_halt, true)
+                |> Q.run(:stop, fn -> {:halt, :done, propagate: false} end, [])
+                |> Q.let(:never, fn -> raise "grandchild must stop" end, [])
+              end,
+              []
+            )
+            |> Q.put(:after_grandchild, true)
+          end,
+          []
+        )
         |> Q.put(:after_child, true)
         |> Q.execute()
 
@@ -480,48 +743,52 @@ defmodule QTest do
     end
 
     test "propagate: true is a plain halt, and both forms are the same at the top level" do
-      child = fn -> Q.new() |> Q.run(:stop, fn -> {:halt, :early, propagate: true} end) end
+      child = fn -> Q.new() |> Q.run(:stop, fn -> {:halt, :early, propagate: true} end, []) end
 
-      assert Q.new() |> Q.run(:child, child) |> Q.put(:never, true) |> Q.execute() ==
+      assert Q.new() |> Q.run(:child, child, []) |> Q.put(:never, true) |> Q.execute() ==
                {:ok, %{child: %{stop: :early}}}
 
       local = fn -> {:halt, :early, propagate: false} end
 
-      assert Q.new() |> Q.run(:stop, local) |> Q.put(:never, true) |> Q.execute() ==
+      assert Q.new() |> Q.run(:stop, local, []) |> Q.put(:never, true) |> Q.execute() ==
                {:ok, %{stop: :early}}
     end
 
     test "other third elements of a halt are invalid returns" do
       for bad <- [{:halt, 1, :bogus}, {:halt, 1, other: true}, {:halt, 1, propagate: :yes}] do
         assert_raise RuntimeError, ~r/expected operation `:step` to return/, fn ->
-          Q.new() |> Q.run(:step, fn -> bad end) |> Q.execute()
+          Q.new() |> Q.run(:step, fn -> bad end, []) |> Q.execute()
         end
       end
     end
 
-    test "a child under an unstored name runs and is discarded" do
+    test "a child under an underscore-prefixed name retains its results and errors" do
       result =
         Q.new()
-        |> Q.run(:_, fn -> Q.new() |> Q.let(:_, fn -> send(self(), :child_ran) end) end)
+        |> Q.run(
+          :_child,
+          fn -> Q.new() |> Q.let(:_sent, fn -> send(self(), :child_ran) end, []) end,
+          []
+        )
         |> Q.execute()
 
-      assert result == {:ok, %{}}
+      assert result == {:ok, %{_child: %{_sent: :child_ran}}}
       assert_received :child_ran
 
-      failing = fn -> Q.new() |> Q.run(:inner, fn -> {:error, :boom} end) end
+      failing = fn -> Q.new() |> Q.run(:inner, fn -> {:error, :boom} end, []) end
 
-      assert Q.new() |> Q.run(:_, failing) |> Q.execute() ==
-               {:error, :_, {:error, :inner, :boom, %{}}, %{}}
+      assert Q.new() |> Q.run(:_child, failing, []) |> Q.execute() ==
+               {:error, :_child, {:error, :inner, :boom, %{}}, %{}}
     end
 
     test "is listed as a run step" do
-      assert [run: :billing] = Q.new() |> Q.run(:billing, fn -> Q.new() end) |> Q.to_list()
+      assert [run: :billing] = Q.new() |> Q.run(:billing, fn -> Q.new() end, []) |> Q.to_list()
     end
   end
 
   describe "__branch__/3" do
     test "a hand-built branch that repeats a step name raises" do
-      assert_raise ArgumentError, ~r/step :a from a branch conflicts/, fn ->
+      assert_raise ArgumentError, ~r/step :a conflicts with a step of the same name/, fn ->
         Q.new()
         |> Q.put(:a, 1)
         |> Q.__branch__(fn -> Q.new() |> Q.put(:a, 2) end, [])
@@ -534,6 +801,24 @@ defmodule QTest do
         |> Q.put(:b, 2)
         |> Q.execute()
       end
+    end
+
+    test "a conflict prevents later branch steps from running" do
+      assert_raise ArgumentError, ~r/step :a conflicts/, fn ->
+        Q.new()
+        |> Q.put(:a, 1)
+        |> Q.__branch__(
+          fn ->
+            Q.new()
+            |> Q.put(:a, 2)
+            |> Q.let(:later, fn -> send(self(), :later_branch_step) end, [])
+          end,
+          []
+        )
+        |> Q.execute()
+      end
+
+      refute_received :later_branch_step
     end
   end
 
@@ -550,6 +835,66 @@ defmodule QTest do
   end
 
   describe "debug/2" do
+    test "filtering accepts valid names and never modifies state" do
+      state = %{:a => 1, {:invite, 7} => :sent}
+      queue = Q.new() |> Q.put(:a, 1) |> Q.put({:invite, 7}, :sent)
+
+      selections = [
+        {:a, %{a: 1}},
+        {{:invite, 7}, %{{:invite, 7} => :sent}},
+        {[:a, {:invite, 7}], state},
+        {[:a, :missing], %{a: 1}},
+        {:missing, %{}},
+        {[], %{}}
+      ]
+
+      for {selection, expected} <- selections do
+        output =
+          capture_io(fn ->
+            assert queue |> Q.debug(only: selection) |> Q.execute() == {:ok, state}
+          end)
+
+        assert {^expected, []} = Code.eval_string(output)
+      end
+    end
+
+    test "inspection options are forwarded after selecting keys" do
+      output =
+        capture_io(fn ->
+          Q.new()
+          |> Q.put(:text, "hello")
+          |> Q.put(:other, :unrelated)
+          |> Q.debug(only: :text, label: "selected", limit: :infinity)
+          |> Q.execute()
+        end)
+
+      assert output == "selected: %{text: \"hello\"}\n"
+    end
+
+    test "non-keyword options are rejected when added" do
+      for opts <- [
+            nil,
+            :invalid,
+            "invalid",
+            %{},
+            [:invalid],
+            [{1, :invalid}],
+            [{:label, "x"} | :invalid]
+          ] do
+        assert_raise ArgumentError, ~r/debug options must be a keyword list/, fn ->
+          Q.debug(Q.new(), opts)
+        end
+      end
+    end
+
+    test "invalid selectors are rejected when added" do
+      for selection <- [nil, true, false, :_, "name", 1, [:a, [:b]], [:a | :invalid]] do
+        assert_raise ArgumentError, ~r/debug :only must be a valid step name/, fn ->
+          Q.debug(Q.new(), only: selection)
+        end
+      end
+    end
+
     test "printing stuff" do
       que =
         Q.new()

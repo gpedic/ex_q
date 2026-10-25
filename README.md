@@ -104,8 +104,8 @@ queue do
   # and stores the value
   decoded <- Base.decode64(trimmed)
 
-  # _ runs a step without storing its result
-  _ <- Notifier.notify(decoded)
+  # Side-effect steps are named and their successful results are stored too
+  notified <- Notifier.notify(decoded)
 end
 ```
 
@@ -123,7 +123,7 @@ def process_data(input) do
     request = input
     cached <- check_cache(request.key)
     processed <- expensive_operation(request)
-    _ <- store_in_cache(request.key, processed)
+    stored <- store_in_cache(request.key, processed)
     execute()
   end
 end
@@ -139,7 +139,7 @@ end
 {:ok, %{request: %{key: "BWBeN28Vb7cMEx7Ym8AUzs", ...}, cached: %{...}}}
 
 # Cache miss
-{:ok, %{request: %{key: "BWBeN28Vb7cMEx7Ym8AUzs", ...}, cached: :not_found, processed: %{...}}}
+{:ok, %{request: %{key: "BWBeN28Vb7cMEx7Ym8AUzs", ...}, cached: :not_found, processed: %{...}, stored: ...}}
 ```
 
 A halt stops the whole pipeline, also from inside a [sub-pipeline](#sub-pipelines). Return `{:halt, value, propagate: false}` to stop only the queue the step is in.
@@ -210,7 +210,9 @@ To store a queue as a value instead of running it, use `=` or return `{:ok, queu
 
 ## Debugging
 
-`debug()` prints the state at that point of the pipeline when it runs. Pass `only:` to print selected keys:
+`debug()` prints the current queue's accumulated state when execution reaches it. Inline conditionals share their enclosing queue's state; named child queues see only their own state. Printing never changes the pipeline's results.
+
+Pass `only:` to print selected keys:
 
 ```elixir
 queue do
@@ -221,28 +223,75 @@ queue do
 end
 
 # Prints:
-%{a: 1}
+# %{a: 1}
 ```
+
+Options can reference earlier steps and capture external variables, just like step expressions:
+
+```elixir
+label = "approval"
+
+queue do
+  selected = :user
+  user = %{id: 7}
+
+  if user.id == 7 do
+    approved = true
+    debug(only: [selected, :approved], label: label)
+  end
+end
+|> Q.execute()
+
+# Prints user and approved with the label "approval".
+```
+
+The options expression runs once each time execution reaches that statement, rather than while building the queue. It isn't evaluated in an untaken branch or after an earlier error or halt.
+
+`only:` accepts one valid step name or a list of names, including tuple names such as `{:invite, 7}`. An empty list prints `%{}`, and valid names missing from the current state are omitted. Invalid names, including `nil`, `true`, `false`, `:_`, strings and nested lists, raise `ArgumentError`. Options must be a keyword list. Q removes `only:` before passing other options to `IO.inspect/2`.
+
+In the functional API, `Q.debug(q, options)` takes ordinary options and validates them when added. DSL options are validated when execution evaluates them.
 
 ## Rules
 
-* Every statement in a `queue` block is a step (`name = expr` or `name <- expr`), `debug()`, a conditional containing steps, or `execute()` as the last statement. Use `_ = expr` to run an expression without storing its result.
-* The left side of a step is a single variable, and each name is bound once. Names starting with `_` aren't stored and can repeat.
+* Every statement in a `queue` block is a step (`name = expr` or `name <- expr`), `debug()`, a conditional containing steps, or `execute()` as the last statement. Every step must have a name, including steps run for their side effects.
+* The left side of a step is a single named variable, and each name is bound once. Every successful step stores its result, including names starting with `_`. Bare `_` is not allowed.
 * Mistakes are compile errors pointing at the line.
 
 ## Building queues programmatically
 
-The `queue` block compiles to the functional API in `Q`, which is also available directly. Use it when the steps come from data, such as a step per item or names that aren't variables:
+The `queue` block compiles to the functional API in `Q`, which is also available directly. Use it when the steps come from data, such as a step per item or names that aren't variables. Step names must be atoms or tuples, such as `:user` or `{:invite, user_id}`; `nil`, `true`, `false` and `:_` are not allowed. Lists, strings and other terms are rejected when the step is added:
 
 ```elixir
 users
 |> Enum.reduce(Q.new(), fn user, q ->
-  Q.run(q, {:invite, user.id}, fn -> Mailer.invite(user) end)
+  Q.run(q, {:invite, user.id}, fn -> Mailer.invite(user) end, [])
 end)
 |> Q.execute()
 ```
 
 Here a step's inputs are listed explicitly: `decoded <- Base.decode64(trimmed)` in a `queue` block is `Q.run(q, :decoded, &Base.decode64/1, [:trimmed])`, and `billing <- billing_steps(user)` is `Q.run(q, :billing, &billing_steps/1, [:user])`. See the [documentation](https://hexdocs.pm/ex_q/Q.html) for `put/3`, `run/4`, `let/4` and `debug/2`.
+
+For both `run` and `let`, omitted params and explicit `[]` have different meanings. These rules apply to functions, captures and MFAs:
+
+| Params | Queue inputs |
+|---|---|
+| Omitted | The whole accumulated state as one argument |
+| `[]` | No queue inputs |
+| `[:input, :options]` | Those results, in the listed order |
+
+For example, a whole-state callback omits params, while an independent operation supplies `[]`:
+
+```elixir
+Q.new()
+|> Q.put(:input, "aGVsbG8")
+|> Q.run(:snapshot, fn state -> {:ok, state} end)
+|> Q.run(:decoded, fn -> Base.decode64("aGVsbG8", padding: false) end, [])
+|> Q.execute()
+
+# {:ok, %{input: "aGVsbG8", snapshot: %{input: "aGVsbG8"}, decoded: "hello"}}
+```
+
+Q validates arity when a step is added. A zero-argument function requires explicit `[]`; it does not change the meaning of omitted params. In the DSL, Q generates the dependency list, so calls such as `token <- generate_token()` need no special syntax.
 
 A queue is a plain value, so functions that add steps to it compose like any other function:
 
@@ -255,6 +304,46 @@ Q.new()
 |> parse()
 |> validate()
 |> Q.execute()
+```
+
+### Passing options to step functions
+
+Fixed arguments, such as function options, can be passed alongside values from earlier steps. An MFA (`{module, function, args}`) lists the fixed arguments in `args`; a function capture can close over them:
+
+```elixir
+options = [padding: false]
+
+Q.new()
+|> Q.put(:encoded, "aGVsbG8")
+|> Q.run(:decoded_mfa, {Base, :decode64, [options]}, [:encoded])
+|> Q.run(:decoded_capture, &Base.decode64(&1, options), [:encoded])
+|> Q.execute()
+
+# {:ok, %{
+#   encoded: "aGVsbG8",
+#   decoded_mfa: "hello",
+#   decoded_capture: "hello"
+# }}
+```
+
+Both steps call `Base.decode64(encoded, options)`. For the MFA, dependency values precede the fixed arguments by default. The capture places them explicitly in the call.
+
+Explicit `[]` passes only an MFA's fixed arguments, for example `Q.run(q, :decoded, {Base, :decode64, ["aGVsbG8", options]}, [])`. `{[], order: :append}` also passes no queue inputs. Omitting params instead passes the whole state before any fixed arguments.
+
+If the options come from an earlier step, list them as another dependency and use a direct function reference:
+
+```elixir
+Q.new()
+|> Q.put(:encoded, "aGVsbG8")
+|> Q.put(:options, padding: false)
+|> Q.run(:decoded, &Base.decode64/2, [:encoded, :options])
+|> Q.execute()
+
+# {:ok, %{
+#   encoded: "aGVsbG8",
+#   options: [padding: false],
+#   decoded: "hello"
+# }}
 ```
 
 ## Installation
