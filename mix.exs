@@ -2,7 +2,7 @@ defmodule Q.MixProject do
   use Mix.Project
 
   @name "Q"
-  @version "1.2.0"
+  @version "2.0.0"
   @url "https://github.com/gpedic/ex_q"
 
   def project do
@@ -36,7 +36,7 @@ defmodule Q.MixProject do
   defp description do
     """
     Q provides powerful pipeline composition inspired by Ecto.Multi,
-    preserving each operation's output for full visibility of your pipeline's state — including when something goes wrong.
+    preserving intermediate results for visibility into your pipeline's state, including when a step returns an error.
     """
   end
 
@@ -60,7 +60,7 @@ defmodule Q.MixProject do
   defp package do
     [
       name: :ex_q,
-      files: ["lib", "mix.exs", "README*", "LICENSE*"],
+      files: ["lib", "mix.exs", "README*", "CHANGELOG*", "LICENSE*"],
       maintainers: ["Goran Pedić"],
       licenses: ["MIT"],
       links: %{"GitHub" => @url}
@@ -72,9 +72,16 @@ defmodule Q.MixProject do
       main: "readme",
       source_ref: "v#{@version}",
       source_url: @url,
+      skip_undefined_reference_warnings_on: ["CHANGELOG.md"],
       extras: [
         "README.md": [title: "Overview"],
+        "CHANGELOG.md": [title: "Changelog"],
         LICENSE: [title: "License"]
+      ],
+      groups_for_docs: [
+        "Writing a pipeline": &(&1[:group] == "Writing a pipeline"),
+        "Functional API": &(&1[:group] == "Functional API"),
+        "Inspecting a queue": &(&1[:group] == "Inspecting a queue")
       ]
     ]
   end
