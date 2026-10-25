@@ -35,6 +35,7 @@ Also new in the block:
 - A step whose function returns a queue runs it as a sub-pipeline, with its results stored as a map under the step's name; `name <- queue do ... end` nests a block inline.
 - A halt stops the whole pipeline, also from inside a sub-pipeline; `{:halt, value, propagate: false}` stops only the queue the step is in.
 - Mistakes, such as binding a name twice or a malformed `if`, `unless`, `case` or `cond` (a missing `do:`, an unknown or duplicate option, no `->` clauses), are compile errors pointing at the line.
+- The docs compare the DSL and the functional API: what each is for, and when mistakes are caught.
 
 ### Functional API
 

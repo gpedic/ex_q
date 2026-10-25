@@ -24,6 +24,9 @@ defmodule Q do
   from earlier results. The block only builds the queue; `execute/1` runs it. See `queue/1`
   for all the rules.
 
+  The block is checked when your code compiles. For pipelines built from data there is a
+  functional API, checked when each step is added; see "The functional API" below.
+
   ## Results
 
   A step written with `<-` must return one of:
@@ -65,19 +68,33 @@ defmodule Q do
   parent stores the child's partial results and continues. To store a queue as a value
   instead of running it, use `=` or return `{:ok, queue}`.
 
-  ## Building queues programmatically
+  ## The functional API
 
-  `queue/1` compiles to the functions below, which can be used directly when the steps
-  come from data, such as a step per item:
+  `queue/1` compiles to these functions, which are also public:
 
     * `put/3` stores a value.
     * `run/4` runs a function that can fail, like `<-`.
     * `let/4` runs a function that can't fail, like `=`.
     * `debug/2` prints the state.
 
-  Here a step function receives the values of the keys listed in its `params`. Omitting
-  `params` passes the whole state as one argument; explicit `[]` passes no queue inputs.
-  These rules apply to both functions and MFAs. See `run/4` for `{module, function, args}`.
+  Both build the same queue, run with `execute/1`, and share the result and error shapes,
+  child queues and halts. A queue built either way can be a child step of the other.
+
+  The DSL gives compile-time checks (a misspelled step reference, a step bound twice, a
+  malformed conditional), inputs inferred from the expression, branching with `if` and
+  `case`, and inline nesting.
+
+  The functional API gives what a block can't: a step per item, named after the item
+  (`Q.run(q, {:invite, id}, fn -> invite(id) end, [])` inside `Enum.reduce/3`); names that
+  aren't variables; steps chosen from data; queues built across functions or on a condition
+  known when the queue is built; and explicit control over inputs. A step function receives
+  the values of the keys listed in its `params`. Omitting `params` passes the whole state as
+  one argument; explicit `[]` passes no queue inputs. These rules apply to both functions
+  and MFAs. See `run/4` for `{module, function, args}`.
+
+  The functional API is checked when the step is added: a wrong arity, an unknown param, an
+  invalid name or a duplicate name raise `ArgumentError` before anything runs, but only once
+  that code runs. Use the DSL whenever the pipeline is written out in code.
 
   Every step has a unique name and stores its successful result. Names are atoms, such as
   `:user`, or tuples, such as `{:invite, user_id}`. The atoms `nil`, `true`, `false` and `:_`

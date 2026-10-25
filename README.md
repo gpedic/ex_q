@@ -44,6 +44,8 @@ end
 # {:ok, %{file: ..., parsed: ..., validated: ..., enriched: ...}}
 ```
 
+The `queue` block is the usual way to write a pipeline, and it is checked when your code compiles. For pipelines built from data, such as a step per item, there is a functional API, checked when each step is added. See [The DSL and the functional API](#the-dsl-and-the-functional-api).
+
 ## Error handling
 
 When a step returns an error, Q identifies the failing step and includes the results of every completed step before it.
@@ -273,9 +275,20 @@ In the functional API, `Q.debug(q, options)` takes ordinary options and validate
 * The left side of a step is a single named variable, and each name is bound once. Every successful step stores its result, including names starting with `_`. Bare `_` is not allowed.
 * Mistakes, including a malformed `if`, `unless`, `case` or `cond`, are compile errors pointing at the line.
 
-## Building queues programmatically
+## The DSL and the functional API
 
-The `queue` block compiles to the functional API in `Q`, which is also available directly. Use it when the steps come from data, such as a step per item or names that aren't variables. Step names must be atoms or tuples, such as `:user` or `{:invite, user_id}`; `nil`, `true`, `false` and `:_` are not allowed. Lists, strings and other terms are rejected when the step is added:
+A `queue` block compiles to the functional API in `Q`, which is also public. Both build the same queue, both run with `execute/1`, and a queue built one way can be a child step in the other. They differ in what they are for.
+
+### What the DSL gives you
+
+* Compile-time checks: a misspelled step reference is an unknown variable, and a step bound twice or a malformed `if`/`case` is a compile error pointing at the line.
+* Inputs inferred from the expression, so a step reads like a normal call: `decoded <- Base.decode64(input)`.
+* Branching by writing `if`, `unless`, `case` or `cond` around the steps.
+* Inline nesting: `billing <- queue do ... end`.
+
+### What the functional API gives you
+
+A step per item, named after the item, so each item's result and failure are tracked separately:
 
 ```elixir
 users
@@ -283,11 +296,39 @@ users
   Q.run(q, {:invite, user.id}, fn -> Mailer.invite(user) end, [])
 end)
 |> Q.execute()
+
+# {:ok, %{{:invite, 1} => :sent, {:invite, 3} => :sent}}
+# {:error, {:invite, 2}, :bounced, %{{:invite, 1} => :sent}}
 ```
 
-Here a step's inputs are listed explicitly: `decoded <- Base.decode64(trimmed)` in a `queue` block is `Q.run(q, :decoded, &Base.decode64/1, [:trimmed])`, and `billing <- billing_steps(user)` is `Q.run(q, :billing, &billing_steps/1, [:user])`. See the [documentation](https://hexdocs.pm/ex_q/Q.html) for `put/3`, `run/4`, `let/4` and `debug/2`.
+Names that aren't variables, such as `{:invite, id}` above or `{:check, :email}`. Step names must be atoms or tuples; `nil`, `true`, `false` and `:_` are not allowed, and lists, strings and other terms are rejected when the step is added.
 
-For both `run` and `let`, omitted params and explicit `[]` have different meanings. These rules apply to functions, captures and MFAs:
+Steps chosen from data, for example a list of named checks, so the error names the check that failed:
+
+```elixir
+checks = [email: &valid_email?/1, age: &adult?/1, country: &supported_country?/1]
+
+checks
+|> Enum.reduce(Q.new() |> Q.put(:user, user), fn {name, check}, q ->
+  Q.run(q, name, check, [:user])
+end)
+|> Q.execute()
+
+# {:error, :age, :underage, %{user: ..., email: true}}
+```
+
+Queues built across functions, and steps added on a condition known when the queue is built:
+
+```elixir
+def parse(q), do: Q.run(q, :parsed, &CSV.parse/1, [:file])
+def validate(q), do: Q.run(q, :validated, &validate_rows/1, [:parsed])
+
+q = Q.new() |> Q.put(:file, data) |> parse() |> validate()
+q = if opts[:notify], do: Q.run(q, :notified, &Notifier.notify/1, [:validated]), else: q
+Q.execute(q)
+```
+
+Explicit control over inputs. A step's inputs are listed: `decoded <- Base.decode64(trimmed)` in a `queue` block is `Q.run(q, :decoded, &Base.decode64/1, [:trimmed])`, and `billing <- billing_steps(user)` is `Q.run(q, :billing, &billing_steps/1, [:user])`. For both `run` and `let`, omitted params and explicit `[]` have different meanings. These rules apply to functions, captures and MFAs:
 
 | Params | Queue inputs |
 |---|---|
@@ -307,20 +348,7 @@ Q.new()
 # {:ok, %{input: "aGVsbG8", snapshot: %{input: "aGVsbG8"}, decoded: "hello"}}
 ```
 
-Q validates arity when a step is added. A zero-argument function requires explicit `[]`; it does not change the meaning of omitted params. In the DSL, Q generates the dependency list, so calls such as `token <- generate_token()` need no special syntax.
-
-A queue is a plain value, so functions that add steps to it compose like any other function:
-
-```elixir
-def parse(q), do: Q.run(q, :parsed, &CSV.parse/1, [:file])
-def validate(q), do: Q.run(q, :validated, &validate_rows/1, [:parsed])
-
-Q.new()
-|> Q.put(:file, data)
-|> parse()
-|> validate()
-|> Q.execute()
-```
+Q validates arity when a step is added. A zero-argument function requires explicit `[]`; it does not change the meaning of omitted params. In the DSL, Q generates the dependency list, so calls such as `token <- generate_token()` need no special syntax. See the [documentation](https://hexdocs.pm/ex_q/Q.html) for `put/3`, `run/4`, `let/4` and `debug/2`.
 
 ### Passing options to step functions
 
@@ -361,6 +389,14 @@ Q.new()
 #   decoded: "hello"
 # }}
 ```
+
+### What they share
+
+The queue, `execute/1`, the result and error shapes, child queues, halts, how a step's return value is handled, and the rules for exceptions and side effects are the same in both. Mixing them is fine: a queue built with the functional API can be a child step in a `queue` block, and the other way round.
+
+### When mistakes are caught
+
+The DSL checks when your code compiles. The functional API checks when the step is added: a wrong arity, an unknown param, an invalid name or a duplicate name raise `ArgumentError` before anything runs, but only once that code runs. That is the price of building from data. When a pipeline is written out in code, use the DSL.
 
 ## Installation
 
