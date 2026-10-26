@@ -32,10 +32,11 @@ defmodule Q do
   A step written with `<-` must return one of:
 
     * `{:ok, value}` - stores `value` under the step's name and continues
-    * `{:error, reason}` - stops; `execute/1` returns `{:error, step, reason, results}`
+    * `{:error, reason}` - stops; `execute/1` returns `{:error, step, reason, results}`, with
+      the results of the steps before it (the failing step has none)
     * `:error` - same as `{:error, :error}`, for functions such as `Base.decode64/1`
     * `{:halt, value}` - stores `value` and stops the queue it's written in; `execute/1`
-      returns `{:ok, results}`
+      returns `{:ok, results}`, without the steps after it
     * a queue - runs it as a child, see below
     * any other value - stores it under the step's name as is
 

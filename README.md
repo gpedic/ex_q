@@ -85,7 +85,7 @@ When a step fails, you get this:
 }}
 ```
 
-The tuple holds the step's name, the reason from its `{:error, reason}`, and every result before it.
+The tuple holds the step's name, the reason from its `{:error, reason}`, and every result before it. The failing step has no result, so it isn't in the map.
 
 You match on the step, not the shape of the error. The earlier results are right there, for logging, error messages or cleanup. On success you get all of them too, as a map you can log, return or pass on.
 
@@ -150,6 +150,8 @@ end
 A step's inputs are the earlier steps it uses: `decoded` uses `trimmed`. Steps run in order, and each result is stored under the step's name.
 
 Use `<-` when the result decides what happens next. Use `=` for everything else, including results you want to keep as they are, like `{:ok, pid}`. Reading a block, the `<-` steps are the ones that can fail.
+
+Step names come from variables, so a block has a fixed set of steps. For a step per item, or names like `{:reserve, sku}`, see [Building queues from data](#building-queues-from-data).
 
 ### Outside values
 
@@ -261,6 +263,15 @@ end
 {:ok, %{request: %{key: "BWBeN28Vb7cMEx7Ym8AUzs", ...}, cached: :not_found, processed: %{...}, stored: ...}}
 ```
 
+The halting step's value is stored under its name, and the steps after it aren't in the results. `Q.execute/1` returns `{:ok, results}` either way, so to tell a halt from a full run, match on a key only one of them has:
+
+```elixir
+case process_data(input) do
+  {:ok, %{stored: _, processed: processed}} -> processed
+  {:ok, %{cached: cached}} -> cached
+end
+```
+
 A halt stops the queue it's in, the way `{:halt, acc}` stops `Enum.reduce_while/3`. In a [child queue](#child-queues), it stops only the child. The parent keeps the child's results and carries on.
 
 ## Child queues
@@ -344,6 +355,16 @@ end)
 
 # {:ok, %{{:invite, 1} => :sent, {:invite, 3} => :sent}}
 # {:error, {:invite, 2}, :bounced, %{{:invite, 1} => :sent}}
+```
+
+Step names must be unique, and a duplicate raises `ArgumentError` when it's added. If items can repeat, add their position to the name, like `{:invite, id, index}`.
+
+Each item's result is stored under its own name, so after a failure you can undo exactly the items that went through:
+
+```elixir
+{:error, step, reason, results} ->
+  for {{:reserve, _sku}, reservation} <- results, do: Inventory.release(reservation)
+  {:error, step, reason}
 ```
 
 **Steps chosen from data**, so the error names the check that failed:
