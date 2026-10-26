@@ -7,18 +7,101 @@ defmodule Q.DSL do
   # the steps bound earlier in the same block that its expression references;
   # they become the arguments of the generated step function, so the expression
   # itself is left as written.
+  #
+  # A block is a scope of its own, like `quote`: the variables in its expressions
+  # get a context unique to the block, so a variable from outside no longer
+  # resolves and Elixir reports it as undefined. Steps and variables bound inside
+  # an expression keep working, since their bindings and uses are rewritten
+  # together. `bind:` is the way in; its values are evaluated where the block is
+  # written and become the queue's first steps.
 
   @old_calls [:put, :run, :let, :inspect]
   @conditionals [:if, :unless, :case, :cond]
+  @special_forms [:__MODULE__, :__ENV__, :__DIR__, :__CALLER__, :__STACKTRACE__]
 
-  def compile(block, caller) do
-    {body, _bound} = compile_statements(statements(block), [], caller)
+  def compile(opts, block, caller) do
+    env = %{caller: caller, scope: :"Elixir.Q.DSL.Scope.#{System.unique_integer([:positive])}"}
+    {binds, names} = compile_binds!(opts, env)
+    {body, _bound} = compile_statements(statements(block), names, names, env)
 
     quote do
       queue = Q.new()
-      unquote_splicing(body)
+      unquote_splicing(binds ++ body)
       queue
     end
+  end
+
+  defp compile_binds!(opts, env) do
+    unless Keyword.keyword?(opts) do
+      compile_error!(
+        env,
+        [],
+        "expected queue options, got: #{Macro.to_string(opts)}; " <>
+          "bring outside values in with `queue bind: [...] do`"
+      )
+    end
+
+    case Keyword.keys(opts) -- [:bind] do
+      [] ->
+        :ok
+
+      [key | _] ->
+        compile_error!(env, [], "unknown queue option #{inspect(key)}; the only option is :bind")
+    end
+
+    entries = Keyword.get(opts, :bind, [])
+
+    unless is_list(entries) do
+      compile_error!(
+        env,
+        [],
+        "expected bind: to be a list of variables or `name: expr` pairs, got: #{Macro.to_string(entries)}"
+      )
+    end
+
+    Enum.map_reduce(entries, [], fn entry, names ->
+      {name, expr, meta} = bind_entry!(entry, env)
+
+      if name in names do
+        compile_error!(env, meta, "#{name} is bound twice")
+      end
+
+      ast =
+        quote do
+          queue = Q.put(queue, unquote(name), unquote(expr))
+        end
+
+      {ast, [name | names]}
+    end)
+  end
+
+  defp bind_entry!({:_, meta, context}, env) when is_atom(context) do
+    compile_error!(env, meta, "every input must have a name; _ cannot be bound")
+  end
+
+  defp bind_entry!({name, meta, context} = var, _env) when is_atom(name) and is_atom(context),
+    do: {name, var, meta}
+
+  defp bind_entry!({name, expr}, _env) when is_atom(name) and name not in [nil, true, false, :_],
+    do: {name, expr, meta(expr)}
+
+  defp bind_entry!(other, env) do
+    compile_error!(
+      env,
+      meta(other),
+      "expected a variable or `name: expr` in bind:, got: #{Macro.to_string(other)}"
+    )
+  end
+
+  defp scope(ast, env) do
+    Macro.prewalk(ast, fn
+      {name, meta, context}
+      when is_atom(name) and is_atom(context) and name not in @special_forms ->
+        {name, meta, env.scope}
+
+      node ->
+        node
+    end)
   end
 
   defp statements({:__block__, _meta, statements}), do: statements
@@ -26,18 +109,18 @@ defmodule Q.DSL do
 
   # `bound` lists every step name visible to this block, to reject duplicates;
   # `steps` lists the names bound earlier in this block, which become params.
-  defp compile_statements(statements, bound, caller) do
+  defp compile_statements(statements, bound, steps, env) do
     {body, {bound, _steps}} =
-      Enum.map_reduce(statements, {bound, []}, fn statement, {bound, steps} ->
-        compile_statement(statement, bound, steps, caller)
+      Enum.map_reduce(statements, {bound, steps}, fn statement, {bound, steps} ->
+        compile_statement(statement, bound, steps, env)
       end)
 
     {body, bound}
   end
 
-  defp compile_statement({op, meta, [lhs, expr]}, bound, steps, caller) when op in [:=, :<-] do
-    name = step_name!(lhs, op, meta, caller)
-    {fun, params} = step_fun(expr, steps)
+  defp compile_statement({op, meta, [lhs, expr]}, bound, steps, env) when op in [:=, :<-] do
+    name = step_name!(lhs, op, meta, env)
+    {fun, params} = step_fun(scope(expr, env), steps)
     call = if op == :=, do: :let, else: :run
 
     ast =
@@ -46,13 +129,13 @@ defmodule Q.DSL do
       end
 
     if name in bound do
-      compile_error!(caller, meta, "#{name} is already a step in this queue")
+      compile_error!(env, meta, "#{name} is already a step in this queue")
     end
 
     {ast, {[name | bound], [name | steps]}}
   end
 
-  defp compile_statement({:debug, _meta, []}, bound, steps, _caller) do
+  defp compile_statement({:debug, _meta, []}, bound, steps, _env) do
     ast =
       quote do
         queue = Q.debug(queue)
@@ -61,8 +144,8 @@ defmodule Q.DSL do
     {ast, {bound, steps}}
   end
 
-  defp compile_statement({:debug, _meta, [opts]}, bound, steps, _caller) do
-    {fun, params} = step_fun(opts, steps)
+  defp compile_statement({:debug, _meta, [opts]}, bound, steps, env) do
+    {fun, params} = step_fun(scope(opts, env), steps)
 
     ast =
       quote do
@@ -72,9 +155,9 @@ defmodule Q.DSL do
     {ast, {bound, steps}}
   end
 
-  defp compile_statement({:merge, meta, [_expr]}, _bound, _steps, caller) do
+  defp compile_statement({:merge, meta, [_expr]}, _bound, _steps, env) do
     compile_error!(
-      caller,
+      env,
       meta,
       "merge(queue) is not a statement; run a queue as a step with `name <- queue`, " <>
         "its results are stored under `name`"
@@ -84,9 +167,10 @@ defmodule Q.DSL do
   # A conditional runs as a branch op: the branch taken builds the queue of its
   # steps. Outer steps the conditional references become params of the branch
   # function, so inside the branches they're plain variables.
-  defp compile_statement({kind, meta, args} = conditional, bound, steps, caller)
+  defp compile_statement({kind, meta, args}, bound, steps, env)
        when kind in @conditionals and is_list(args) do
-    {branches, branch_names} = compile_branches(kind, args, meta, bound, caller)
+    {kind, meta, args} = conditional = scope({kind, meta, args}, env)
+    {branches, branch_names} = compile_branches(kind, args, meta, bound, env)
     {fun, params} = step_fun(conditional, steps, {kind, meta, branches})
 
     ast =
@@ -99,20 +183,20 @@ defmodule Q.DSL do
 
   # A queue block only builds a queue, so it can be returned from a helper and run
   # as a child; running it is the caller's job.
-  defp compile_statement({name, meta, []}, _bound, _steps, caller)
+  defp compile_statement({name, meta, []}, _bound, _steps, env)
        when name in [:execute, :exec] do
     compile_error!(
-      caller,
+      env,
       meta,
       "#{name}() is not a queue statement; a queue block builds a queue, " <>
         "run it with `queue do ... end |> execute()`"
     )
   end
 
-  defp compile_statement({name, meta, args}, _bound, _steps, caller)
+  defp compile_statement({name, meta, args}, _bound, _steps, env)
        when name in @old_calls and is_list(args) do
     compile_error!(
-      caller,
+      env,
       meta,
       "#{name}/#{length(args)} is not a queue statement since Q 2.0, steps are bindings: " <>
         "`name = expr` for values and functions that can't fail, `name <- expr` for " <>
@@ -120,26 +204,26 @@ defmodule Q.DSL do
     )
   end
 
-  defp compile_statement(statement, _bound, _steps, caller) do
+  defp compile_statement(statement, _bound, _steps, env) do
     compile_error!(
-      caller,
+      env,
       meta(statement),
       "expected a step such as `name = expr` or `name <- expr`, got: " <>
         "#{Macro.to_string(statement)}; every step must have a name"
     )
   end
 
-  defp step_name!({:_, _meta, context}, _op, meta, caller) when is_atom(context) do
-    compile_error!(caller, meta, "every step must have a name; _ cannot name a step")
+  defp step_name!({:_, _meta, context}, _op, meta, env) when is_atom(context) do
+    compile_error!(env, meta, "every step must have a name; _ cannot name a step")
   end
 
-  defp step_name!({name, _meta, context}, _op, _meta_op, _caller)
+  defp step_name!({name, _meta, context}, _op, _meta_op, _env)
        when is_atom(name) and is_atom(context),
        do: name
 
-  defp step_name!(lhs, op, meta, caller) do
+  defp step_name!(lhs, op, meta, env) do
     compile_error!(
-      caller,
+      env,
       meta,
       "expected a variable on the left of #{op}, got: #{Macro.to_string(lhs)}"
     )
@@ -147,14 +231,14 @@ defmodule Q.DSL do
 
   # Conditionals are rewritten before Elixir sees them, so their shape is checked
   # here: anything the rewrite didn't understand would otherwise be dropped.
-  defp compile_branches(kind, [condition, opts], meta, bound, caller)
+  defp compile_branches(kind, [condition, opts], meta, bound, env)
        when kind in [:if, :unless] do
-    check_options!(kind, opts, [:do, :else], meta, caller)
+    check_options!(kind, opts, [:do, :else], meta, env)
 
     # The user's options are kept, with each branch compiled in place
     {opts, names} =
       Enum.map_reduce(opts, [], fn {key, block}, names ->
-        {branch, branch_names} = compile_branch(block, bound, caller)
+        {branch, branch_names} = compile_branch(block, bound, env)
         {{key, branch}, branch_names ++ names}
       end)
 
@@ -163,65 +247,65 @@ defmodule Q.DSL do
     {[condition, opts], Enum.uniq(names)}
   end
 
-  defp compile_branches(:case, [expr, opts], meta, bound, caller) do
-    check_options!(:case, opts, [:do], meta, caller)
-    clauses = arrow_clauses!(:case, Keyword.fetch!(opts, :do), meta, caller)
-    {clauses, names} = compile_clauses(clauses, bound, caller)
+  defp compile_branches(:case, [expr, opts], meta, bound, env) do
+    check_options!(:case, opts, [:do], meta, env)
+    clauses = arrow_clauses!(:case, Keyword.fetch!(opts, :do), meta, env)
+    {clauses, names} = compile_clauses(clauses, bound, env)
     {[expr, [do: clauses]], names}
   end
 
-  defp compile_branches(:cond, [opts], meta, bound, caller) do
-    check_options!(:cond, opts, [:do], meta, caller)
-    clauses = arrow_clauses!(:cond, Keyword.fetch!(opts, :do), meta, caller)
-    {clauses, names} = compile_clauses(clauses, bound, caller)
+  defp compile_branches(:cond, [opts], meta, bound, env) do
+    check_options!(:cond, opts, [:do], meta, env)
+    clauses = arrow_clauses!(:cond, Keyword.fetch!(opts, :do), meta, env)
+    {clauses, names} = compile_clauses(clauses, bound, env)
     {[[do: clauses]], names}
   end
 
-  defp compile_branches(kind, args, meta, _bound, caller) do
+  defp compile_branches(kind, args, meta, _bound, env) do
     expected =
       if kind == :cond,
         do: "1 argument (a do: block)",
         else: "2 arguments (an expression and a do: block)"
 
-    compile_error!(caller, meta, "#{kind} expects #{expected}, got #{length(args)}")
+    compile_error!(env, meta, "#{kind} expects #{expected}, got #{length(args)}")
   end
 
-  defp check_options!(kind, opts, allowed, meta, caller) do
+  defp check_options!(kind, opts, allowed, meta, env) do
     keys = if Keyword.keyword?(opts), do: Keyword.keys(opts), else: []
 
     cond do
       not Keyword.keyword?(opts) or :do not in keys ->
-        compile_error!(caller, meta, "#{kind} requires a do: block")
+        compile_error!(env, meta, "#{kind} requires a do: block")
 
       (unknown = Enum.reject(keys, &(&1 in allowed))) != [] ->
         compile_error!(
-          caller,
+          env,
           meta,
           "unknown #{kind} option #{inspect(hd(unknown))}; supported options are " <>
             Enum.map_join(allowed, " and ", &inspect/1)
         )
 
       (duplicates = keys -- Enum.uniq(keys)) != [] ->
-        compile_error!(caller, meta, "duplicate #{kind} option #{inspect(hd(duplicates))}")
+        compile_error!(env, meta, "duplicate #{kind} option #{inspect(hd(duplicates))}")
 
       true ->
         :ok
     end
   end
 
-  defp arrow_clauses!(kind, body, meta, caller) do
+  defp arrow_clauses!(kind, body, meta, env) do
     form = if kind == :case, do: "pattern -> steps", else: "condition -> steps"
 
     case body do
       empty
       when empty == [] or
              (is_tuple(empty) and elem(empty, 0) == :__block__ and elem(empty, 2) == []) ->
-        compile_error!(caller, meta, "#{kind} requires at least one -> clause")
+        compile_error!(env, meta, "#{kind} requires at least one -> clause")
 
       clauses when is_list(clauses) ->
         for clause <- clauses, not match?({:->, _, [head, _]} when is_list(head), clause) do
           compile_error!(
-            caller,
+            env,
             meta(clause) ++ meta,
             "expected #{kind} clauses in the form `#{form}`, got: #{Macro.to_string(clause)}"
           )
@@ -231,17 +315,17 @@ defmodule Q.DSL do
 
       other ->
         compile_error!(
-          caller,
+          env,
           meta(other) ++ meta,
           "expected #{kind} clauses in the form `#{form}`, got: #{Macro.to_string(other)}"
         )
     end
   end
 
-  defp compile_clauses(clauses, bound, caller) do
+  defp compile_clauses(clauses, bound, env) do
     {clauses, names} =
       Enum.map_reduce(clauses, [], fn {:->, meta, [head, body]}, names ->
-        {branch, branch_names} = compile_branch(body, bound, caller)
+        {branch, branch_names} = compile_branch(body, bound, env)
         {{:->, meta, [head, branch]}, branch_names ++ names}
       end)
 
@@ -250,10 +334,10 @@ defmodule Q.DSL do
 
   # Returns code building the branch's queue, and the step names it binds. An
   # explicit nil branch (`do: nil`) adds no steps.
-  defp compile_branch(nil, _bound, _caller), do: {quote(do: Q.new()), []}
+  defp compile_branch(nil, _bound, _env), do: {quote(do: Q.new()), []}
 
-  defp compile_branch(block, bound, caller) do
-    {body, branch_bound} = compile_statements(statements(block), bound, caller)
+  defp compile_branch(block, bound, env) do
+    {body, branch_bound} = compile_statements(statements(block), bound, [], env)
 
     ast =
       quote do
@@ -300,7 +384,7 @@ defmodule Q.DSL do
   defp meta({_name, meta, _args}) when is_list(meta), do: meta
   defp meta(_statement), do: []
 
-  defp compile_error!(caller, meta, description) do
+  defp compile_error!(%{caller: caller}, meta, description) do
     raise CompileError,
       file: caller.file,
       line: Keyword.get(meta, :line, caller.line),

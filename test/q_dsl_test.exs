@@ -10,13 +10,13 @@ defmodule Q.DSLTest do
   defp positive(_n), do: {:error, :not_positive}
 
   defp greeting(name) do
-    queue do
+    queue bind: [name] do
       greeting = "hello " <> name
     end
   end
 
   defp named(queue) do
-    queue do
+    queue bind: [queue] do
       name = queue
     end
     |> execute()
@@ -24,7 +24,7 @@ defmodule Q.DSLTest do
 
   defp compile_error(code) do
     assert_raise CompileError, fn ->
-      Code.eval_string("import Q, only: [queue: 1]\n\n" <> code)
+      Code.eval_string("import Q, only: [queue: 1, queue: 2]\n\n" <> code)
     end
   end
 
@@ -32,7 +32,9 @@ defmodule Q.DSLTest do
   defp malformed(code) do
     error =
       assert_raise CompileError, fn ->
-        Code.eval_string("import Q, only: [queue: 1]\n" <> code, [], file: "malformed.exs")
+        Code.eval_string("import Q, only: [queue: 1, queue: 2]\n" <> code, [],
+          file: "malformed.exs"
+        )
       end
 
     assert error.file =~ "malformed.exs"
@@ -129,17 +131,17 @@ defmodule Q.DSLTest do
       assert {:ok, %{joined: "hello world"}} = result
     end
 
-    test "other variables are captured as usual" do
+    test "outside variables come in through bind:" do
       punctuation = "!"
 
       result =
-        queue do
+        queue bind: [punctuation] do
           text = "hi"
           shout = String.upcase(text) <> punctuation
         end
         |> execute()
 
-      assert {:ok, %{shout: "HI!"}} = result
+      assert result == {:ok, %{punctuation: "!", text: "hi", shout: "HI!"}}
     end
 
     test "a step name shadowed in a nested fn keeps the inner meaning" do
@@ -263,20 +265,22 @@ defmodule Q.DSLTest do
       assert {:ok, %{name: "joe", greeting: %{greeting: "hello joe"}}} = result
     end
 
-    test "a queue block nests inline and can use outer steps" do
+    test "a queue block nests inline and binds outer steps" do
       result =
         queue do
           name = "joe"
 
           greeting <-
-            queue do
+            queue bind: [name] do
               text = "hello " <> name
               upper = String.upcase(text)
             end
         end
         |> execute()
 
-      assert {:ok, %{name: "joe", greeting: %{text: "hello joe", upper: "HELLO JOE"}}} = result
+      assert result ==
+               {:ok,
+                %{name: "joe", greeting: %{name: "joe", text: "hello joe", upper: "HELLO JOE"}}}
     end
 
     test "a child halt with propagate: false lets the parent continue" do
@@ -376,11 +380,11 @@ defmodule Q.DSLTest do
                Code.eval_string(parent_output)
     end
 
-    test "options can use earlier steps and capture external variables" do
+    test "options can use earlier steps and bound values" do
       label = "selected"
 
       queue =
-        queue do
+        queue bind: [label] do
           selected = :a
           a = 1
           debug(only: selected, label: label)
@@ -388,12 +392,12 @@ defmodule Q.DSLTest do
 
       output =
         capture_io(fn ->
-          assert execute(queue) == {:ok, %{selected: :a, a: 1}}
+          assert execute(queue) == {:ok, %{label: "selected", selected: :a, a: 1}}
         end)
 
       assert output == "selected: %{a: 1}\n"
-      assert Q.operations(queue) == [:selected, :a]
-      assert Q.__to_list__(queue) == [let: :selected, let: :a, debug: nil]
+      assert Q.operations(queue) == [:label, :selected, :a]
+      assert Q.__to_list__(queue) == [put: :label, let: :selected, let: :a, debug: nil]
     end
 
     test "options are evaluated once per execution, and never while building" do
@@ -424,7 +428,7 @@ defmodule Q.DSLTest do
       output =
         capture_io(fn ->
           result =
-            queue do
+            queue bind: [label] do
               selected = :a
               a = 1
 
@@ -434,7 +438,7 @@ defmodule Q.DSLTest do
             end
             |> execute()
 
-          assert result == {:ok, %{selected: :a, a: 1}}
+          assert result == {:ok, %{label: "enclosing", selected: :a, a: 1}}
         end)
 
       assert output == "enclosing: %{a: 1}\n"
@@ -442,11 +446,11 @@ defmodule Q.DSLTest do
 
     test "options are not evaluated after an earlier error or halt" do
       for {outcome, expected} <- [
-            {{:error, :offline}, {:error, :stopped, :offline, %{}}},
-            {{:halt, :done}, {:ok, %{stopped: :done}}}
+            {{:error, :offline}, {:error, :stopped, :offline, %{outcome: {:error, :offline}}}},
+            {{:halt, :done}, {:ok, %{outcome: {:halt, :done}, stopped: :done}}}
           ] do
         queue =
-          queue do
+          queue bind: [outcome] do
             stopped <- outcome
 
             debug(
@@ -477,7 +481,7 @@ defmodule Q.DSLTest do
     test "invalid deferred options are rejected only when reached" do
       for options <- [:invalid, %{}, [only: nil], [only: [:a, [:b]]]] do
         queue =
-          queue do
+          queue bind: [options] do
             debug(options)
           end
 
@@ -491,7 +495,7 @@ defmodule Q.DSLTest do
 
   describe "branching" do
     defp checkout(total) do
-      queue do
+      queue bind: [total] do
         amount = total
 
         if amount > 100 do
@@ -512,7 +516,7 @@ defmodule Q.DSLTest do
 
     test "if without else, and unless" do
       run = fn flag ->
-        queue do
+        queue bind: [flag] do
           on = flag
           if on, do: yes = true
           unless on, do: no = true
@@ -527,7 +531,7 @@ defmodule Q.DSLTest do
 
     test "case binds pattern variables for its branch" do
       run = fn input ->
-        queue do
+        queue bind: [input] do
           result = input
 
           case result do
@@ -544,7 +548,7 @@ defmodule Q.DSLTest do
 
     test "cond and nested conditionals" do
       run = fn n ->
-        queue do
+        queue bind: [n] do
           number = n
 
           cond do
@@ -768,6 +772,123 @@ defmodule Q.DSLTest do
         end
         """)
       end
+    end
+  end
+
+  describe "bind:" do
+    test "binds outside values as the first steps" do
+      order = %{id: 1}
+      opts = [limit: 100]
+
+      q =
+        queue bind: [order, limit: opts[:limit]] do
+          total = order.id * 50
+          over = total > limit
+        end
+
+      assert Q.operations(q) == [:order, :limit, :total, :over]
+      assert Q.__to_list__(q) == [put: :order, put: :limit, let: :total, let: :over]
+      assert execute(q) == {:ok, %{order: %{id: 1}, limit: 100, total: 50, over: false}}
+    end
+
+    test "bound values are evaluated once, when the block is built" do
+      q =
+        queue bind: [stamp: send(self(), :bound)] do
+          copy = stamp
+        end
+
+      assert_received :bound
+      assert execute(q) == {:ok, %{stamp: :bound, copy: :bound}}
+      assert execute(q) == {:ok, %{stamp: :bound, copy: :bound}}
+      refute_received :bound
+    end
+
+    test "a bound name is a step name" do
+      error = compile_error("a = 1\nqueue bind: [a, a] do\nend")
+      assert error.description == "a is bound twice"
+
+      error = compile_error("a = 1\nqueue bind: [a] do\n  a = 2\nend")
+      assert error.description == "a is already a step in this queue"
+    end
+
+    test "entries must be variables or name: expr pairs" do
+      error = compile_error("queue bind: [1] do\nend")
+      assert error.description == "expected a variable or `name: expr` in bind:, got: 1"
+
+      error = compile_error("queue bind: [_] do\nend")
+      assert error.description == "every input must have a name; _ cannot be bound"
+
+      error = compile_error("queue bind: :a do\nend")
+      assert error.description =~ "expected bind: to be a list of variables or `name: expr` pairs"
+    end
+
+    test "other queue options are rejected" do
+      error = compile_error("queue timeout: 1 do\nend")
+      assert error.description == "unknown queue option :timeout; the only option is :bind"
+
+      error = compile_error("a = 1\nqueue [a] do\nend")
+      assert error.description =~ "bring outside values in with `queue bind: [...] do`"
+    end
+  end
+
+  describe "scope" do
+    # Compiles with usr and limit in scope, and returns the compiler's diagnostics
+    defp undefined_in_block(code) do
+      capture_io(:stderr, fn ->
+        assert_raise CompileError, fn ->
+          Code.eval_string("import Q, only: [queue: 1, queue: 2]\n" <> code, usr: 99, limit: 1)
+        end
+      end)
+    end
+
+    test "an outside variable in a step is a compile error, even when it exists" do
+      assert undefined_in_block("queue do\n  user = 12\n  profile = {:profile, usr}\nend") =~
+               ~s(undefined variable "usr")
+    end
+
+    test "an outside variable in a condition is a compile error" do
+      assert undefined_in_block("queue do\n  total = 5\n  if total > limit, do: big = true\nend") =~
+               ~s(undefined variable "limit")
+    end
+
+    test "an outside variable in debug options is a compile error" do
+      assert undefined_in_block("queue do\n  a = 1\n  debug(only: :a, label: usr)\nend") =~
+               ~s(undefined variable "usr")
+    end
+
+    test "a nested block sees only what it binds" do
+      code = "queue do\n  name = 1\n  inner <- queue do\n    copy = name\n  end\nend"
+      assert undefined_in_block(code) =~ ~s(undefined variable "name")
+    end
+
+    test "bindings local to an expression keep working" do
+      result =
+        queue do
+          items = [1, 2, 3]
+          doubled = for item <- items, do: item * 2
+          summed = Enum.reduce(items, 0, fn item, acc -> item + acc end)
+
+          kind =
+            case items do
+              [first | _] -> {:first, first}
+              [] -> :empty
+            end
+
+          module = __MODULE__
+          suffix = @suffix
+        end
+        |> execute()
+
+      assert result ==
+               {:ok,
+                %{
+                  items: [1, 2, 3],
+                  doubled: [2, 4, 6],
+                  summed: 6,
+                  kind: {:first, 1},
+                  module: __MODULE__,
+                  suffix: "!"
+                }}
     end
   end
 

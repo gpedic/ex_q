@@ -409,8 +409,8 @@ defmodule Q do
       {:ok, %{input: "aGVsbG8=", decoded: "hello", greeting: true}}
   """
   @doc group: "Writing a pipeline"
-  defmacro queue(do: block) do
-    Q.DSL.compile(block, __CALLER__)
+  defmacro queue(opts \\ [], do: block) do
+    Q.DSL.compile(opts, block, __CALLER__)
   end
 
   defp add_op(%Q{}, {:step, :_, _kind, _}) do
