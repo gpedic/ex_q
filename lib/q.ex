@@ -7,22 +7,22 @@ defmodule Q do
 
   ## Writing a pipeline
 
-  Pipelines are written with `queue/1`, where every step is a binding:
+  Pipelines are written with `queue/2`, where every step is a binding:
 
       import Q
 
-      queue do
-        input = data                       # stores a value
-        trimmed = String.trim(input)       # a function that can't fail
+      queue bind: [data] do
+        trimmed = String.trim(data)        # a function that can't fail
         decoded <- Base.decode64(trimmed)  # a function that can fail
         notified <- Notifier.notify(decoded)
       end
       |> execute()
 
-  A step's inputs are the earlier steps its expression uses; other variables are captured
-  as in any closure. `if`, `unless`, `case` and `cond` around steps choose which steps run
-  from earlier results. The block only builds the queue; `execute/1` runs it. See `queue/1`
-  for all the rules.
+  A block is a scope of its own, like `quote`: a step's expression can use earlier steps,
+  which become its inputs, but not variables from outside the block. Outside values come in
+  through `bind:`, which makes them the queue's first steps. `if`, `unless`, `case` and
+  `cond` around steps choose which steps run from earlier results. The block only builds
+  the queue; `execute/1` runs it. See `queue/2` for all the rules.
 
   The block is checked when your code compiles. For pipelines built from data there is a
   functional API, checked when each step is added; see "The functional API" below.
@@ -55,7 +55,7 @@ defmodule Q do
   and the child's result map is stored under the step's name. The child's step names stay
   separate from the parent's, so a queue built by a function can be reused anywhere:
 
-      queue do
+      queue bind: [id] do
         user <- Accounts.fetch_user(id)
         billing <- billing_steps(user)
         shipping <- shipping_steps(user)
@@ -63,7 +63,7 @@ defmodule Q do
       end
 
   If a child step fails, the parent step fails with the child's error tuple as the reason:
-  `{:error, :billing, {:error, :charge, :declined, %{...}}, %{user: ...}}`. A halt in a
+  `{:error, :billing, {:error, :charge, :declined, %{...}}, %{id: ..., user: ...}}`. A halt in a
   child stops the parent too, unless it is `{:halt, value, propagate: false}`; then the
   parent stores the child's partial results and continues. To store a queue as a value
   instead of running it, use `=` or return `{:ok, queue}`.
@@ -80,9 +80,9 @@ defmodule Q do
   Both build the same queue, run with `execute/1`, and share the result and error shapes,
   child queues and halts. A queue built either way can be a child step of the other.
 
-  The DSL gives compile-time checks (a misspelled step reference, a step bound twice, a
-  malformed conditional), inputs inferred from the expression, branching with `if` and
-  `case`, and inline nesting.
+  The DSL gives compile-time checks (a misspelled step reference, an outside variable that
+  wasn't bound, a step bound twice, a malformed conditional), inputs inferred from the
+  expression, branching with `if` and `case`, and inline nesting.
 
   The functional API gives what a block can't: a step per item, named after the item
   (`Q.run(q, {:invite, id}, fn -> invite(id) end, [])` inside `Enum.reduce/3`); names that
@@ -386,31 +386,41 @@ defmodule Q do
   Rules:
 
     * The step is named after the variable, and its inputs are the earlier steps `expr`
-      uses. Other variables are captured as in any closure.
+      uses. Variables from outside the block can't be used; bring them in with `bind:`.
+      Variables bound inside `expr` itself, such as `fn` arguments and `case` patterns,
+      work as usual.
     * The left side is a single named variable, and a name is bound once. Every successful
       result is stored, including names starting with `_`. Bare `_` is not allowed.
     * A step bound inside a branch is in the result, but can't be used after the conditional.
     * A `<-` step whose expression returns a queue runs it as a child, and stores the child's
-      results as a map under the step's name. `name <- queue do ... end` nests a block inline.
+      results as a map under the step's name. `name <- queue bind: [...] do ... end` nests a
+      block inline; the nested block binds what it needs, like any other.
     * Expressions are evaluated when the queue runs, not when it's built.
 
   Breaking a rule is a compile error. The block returns the queue without running it, so a
   function can build a queue and its caller decides when to run it, or runs it as a child
   step. Run it with `execute/1`.
 
+  ## Options
+
+    * `bind:` - a list of outside values to bring in, each becoming one of the queue's
+      first steps. A bare variable is bound under its own name; a `name: expr` pair binds
+      the value of any expression. The values are evaluated when the block is built, so
+      they're in the state like any step, including in error tuples.
+
   ## Example
       iex> import Q
-      iex> queue do
-      ...>   input = "aGVsbG8="
-      ...>   decoded <- Base.decode64(input)
+      iex> data = "aGVsbG8="
+      iex> queue bind: [data] do
+      ...>   decoded <- Base.decode64(data)
       ...>   if decoded == "hello", do: greeting = true
       ...> end
       ...> |> execute()
-      {:ok, %{input: "aGVsbG8=", decoded: "hello", greeting: true}}
+      {:ok, %{data: "aGVsbG8=", decoded: "hello", greeting: true}}
   """
   @doc group: "Writing a pipeline"
-  defmacro queue(do: block) do
-    Q.DSL.compile(block, __CALLER__)
+  defmacro queue(opts \\ [], do: block) do
+    Q.DSL.compile(opts, block, __CALLER__)
   end
 
   defp add_op(%Q{}, {:step, :_, _kind, _}) do

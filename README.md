@@ -22,8 +22,7 @@ defmodule UploadProcessor do
   import Q
 
   def process_upload(file_data) do
-    queue do
-      file = file_data
+    queue bind: [file: file_data] do
       parsed <- DataProcessor.parse_csv(file)
       validated <- validate_rows(parsed)
       enriched <- DataProcessor.enrich_data(validated, use_ai: true)
@@ -52,8 +51,7 @@ When a step returns an error, Q identifies the failing step and includes the res
 
 ```elixir
 def process_data(data) do
-  queue do
-    raw = data
+  queue bind: [raw: data] do
     decoded <- Jason.decode(raw)
     validated <- validate_schema(decoded)
     normalized <- normalize_data(validated)
@@ -81,7 +79,7 @@ Exceptions raised by step functions propagate unchanged to the caller, including
 Q does not automatically roll back completed operations. Stopping a queue after a returned error, raised exception or halt leaves earlier side effects in place:
 
 ```elixir
-queue do
+queue bind: [card] do
   payment <- Payments.charge(card)
   receipt <- Receipts.create(payment)
 end
@@ -113,9 +111,9 @@ end
 Every step is a binding, and the variable names the step:
 
 ```elixir
-queue do
+# Outside values come in through bind:, as the queue's first steps
+queue bind: [input] do
   # = stores the value of an expression: a value, or a function that can't fail
-  input = data
   trimmed = String.trim(input)
 
   # <- runs a function that returns {:ok, value}, {:error, reason} or :error,
@@ -127,7 +125,22 @@ queue do
 end
 ```
 
-A step's inputs are the earlier steps its expression uses: `decoded <- Base.decode64(trimmed)` depends on `trimmed`. Other variables, such as function arguments, are captured as in any closure. Steps run in order when the queue is executed, and each result is stored under the step's name.
+A step's inputs are the earlier steps its expression uses: `decoded <- Base.decode64(trimmed)` depends on `trimmed`. Steps run in order when the queue is executed, and each result is stored under the step's name.
+
+A block is a scope of its own, like `quote`: a step can't use variables from outside the block, so a misspelled step name is a compile error even when a variable of that name exists. Bring outside values in with `bind:`. A bare variable is bound under its own name, and `name: expr` binds any expression:
+
+```elixir
+def settings(conn, opts) do
+  queue bind: [opts, current_user: conn.assigns.current_user] do
+    settings <- Settings.load(current_user, opts)
+  end
+  |> execute()
+end
+
+# {:ok, %{opts: ..., current_user: ..., settings: ...}}
+```
+
+Bound values are evaluated when the block is built. They're ordinary steps: in the state, and in the result and error tuples. Variables bound inside an expression, such as `fn` arguments and `case` patterns, work as usual.
 
 The block only builds the queue and returns it; pipe it into `execute/1` to run it. That way a function can build a queue and leave it to the caller whether to run it now or as a [sub-pipeline](#sub-pipelines).
 
@@ -137,8 +150,7 @@ A step can return `{:halt, value}` to end the pipeline successfully, skipping th
 
 ```elixir
 def process_data(input) do
-  queue do
-    request = input
+  queue bind: [request: input] do
     cached <- check_cache(request.key)
     processed <- expensive_operation(request)
     stored <- store_in_cache(request.key, processed)
@@ -167,7 +179,7 @@ A halt stops the whole pipeline, also from inside a [sub-pipeline](#sub-pipeline
 Wrap steps in `if`, `unless`, `case` or `cond` to choose which steps run based on earlier results:
 
 ```elixir
-queue do
+queue bind: [order] do
   total <- Orders.total(order)
 
   if total > 100 do
@@ -187,20 +199,20 @@ A step whose function returns a queue runs it as a child, and stores the child's
 
 ```elixir
 def billing_steps(user) do
-  queue do
+  queue bind: [user] do
     validated <- Billing.validate(user)
     invoice <- Billing.invoice(validated)
   end
 end
 
 def shipping_steps(user) do
-  queue do
+  queue bind: [user] do
     validated <- Shipping.validate(user)
     tracking <- Shipping.book(validated)
   end
 end
 
-queue do
+queue bind: [id] do
   user <- Accounts.fetch_user(id)
   billing <- billing_steps(user)
   shipping <- shipping_steps(user)
@@ -209,19 +221,20 @@ end
 |> execute()
 
 # {:ok, %{
+#   id: ...,
 #   user: ...,
-#   billing: %{validated: ..., invoice: ...},
-#   shipping: %{validated: ..., tracking: ...},
+#   billing: %{user: ..., validated: ..., invoice: ...},
+#   shipping: %{user: ..., validated: ..., tracking: ...},
 #   confirmation: ...
 # }}
 ```
 
-Both children use `validated` without conflict. A child runs with its own state, so it gets its inputs as arguments, like `user` above. A block can also be nested inline: `billing <- queue do ... end`.
+Both children use `validated` without conflict. A child runs with its own state, so it binds its inputs, like `user` above. A block can also be nested inline: `billing <- queue bind: [user] do ... end`; the nested block is a scope of its own too, and binds what it needs from the enclosing one.
 
 If a child step fails, the parent step fails and the reason is the child's error tuple, with the child's results up to the failure:
 
 ```elixir
-{:error, :billing, {:error, :invoice, :declined, %{validated: ...}}, %{user: ...}}
+{:error, :billing, {:error, :invoice, :declined, %{user: ..., validated: ...}}, %{id: ..., user: ...}}
 ```
 
 To store a queue as a value instead of running it, use `=` or return `{:ok, queue}`.
@@ -244,12 +257,12 @@ end
 # %{a: 1}
 ```
 
-Options can reference earlier steps and capture external variables, just like step expressions:
+Options can reference earlier steps and bound values, just like step expressions:
 
 ```elixir
 label = "approval"
 
-queue do
+queue bind: [label] do
   selected = :user
   user = %{id: 7}
 
@@ -273,6 +286,7 @@ In the functional API, `Q.debug(q, options)` takes ordinary options and validate
 
 * Every statement in a `queue` block is a step (`name = expr` or `name <- expr`), `debug()`, or a conditional containing steps. `execute()` isn't a statement: the block builds the queue, and `execute/1` runs it. Every step must have a name, including steps run for their side effects.
 * The left side of a step is a single named variable, and each name is bound once. Every successful step stores its result, including names starting with `_`. Bare `_` is not allowed.
+* Steps can't use variables from outside the block. Bring them in with `bind:`, which makes them the queue's first steps. Variables bound inside an expression, such as `fn` arguments, work as usual.
 * Mistakes, including a malformed `if`, `unless`, `case` or `cond`, are compile errors pointing at the line.
 
 ## The DSL and the functional API
@@ -281,10 +295,10 @@ A `queue` block compiles to the functional API in `Q`, which is also public. Bot
 
 ### What the DSL gives you
 
-* Compile-time checks: a misspelled step reference is an unknown variable, and a step bound twice or a malformed `if`/`case` is a compile error pointing at the line.
+* Compile-time checks: a misspelled step reference or an unbound outside variable is an unknown variable, and a step bound twice or a malformed `if`/`case` is a compile error pointing at the line.
 * Inputs inferred from the expression, so a step reads like a normal call: `decoded <- Base.decode64(input)`.
 * Branching by writing `if`, `unless`, `case` or `cond` around the steps.
-* Inline nesting: `billing <- queue do ... end`.
+* Inline nesting: `billing <- queue bind: [user] do ... end`.
 
 ### What the functional API gives you
 
