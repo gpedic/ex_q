@@ -1,6 +1,7 @@
 defmodule Q do
   @moduledoc """
-  Build pipelines of named steps, in the spirit of `Ecto.Multi`, and run them with `execute/1`.
+  A `with` that remembers: a chain of named steps, run with `execute/1`, that keeps every
+  step's result.
 
   Every step's result is stored in a state map under the step's name. When a step returns an error,
   `execute/1` returns the failing step's name and error together with the state built so far.

@@ -5,7 +5,7 @@
 
 # Q
 
-Q is a `with` that remembers. When a step fails, you get its name, its error, and every result that came before it.
+Q is a `with` that remembers. You get the result of every step, and when one fails, its name, its error and everything before it.
 
 ## The problem with `with`
 
@@ -17,7 +17,8 @@ def handle_webhook(conn, body, signature) do
        {:ok, event} <- Jason.decode(payload),
        {:ok, account} <- Accounts.fetch_by_customer(event["customer"]),
        {:ok, subscription} <- Subscriptions.fetch(account, event["subscription"]),
-       {:ok, _} <- Subscriptions.apply_event(subscription, event) do
+       {:ok, updated} <- Subscriptions.apply_event(subscription, event),
+       {:ok, _} <- Notifications.subscription_changed(account, updated) do
     send_resp(conn, 200, "")
   else
     {:error, :invalid_signature} ->
@@ -27,8 +28,9 @@ def handle_webhook(conn, body, signature) do
       send_resp(conn, 400, "")
 
     {:error, reason} ->
-      # Was it the account or the subscription that wasn't found? Or did applying
-      # the event fail? And which event was it? `event` isn't in scope here.
+      # Was it the account or the subscription that wasn't found? Did applying the
+      # event fail, or the notification? And which event was it? `event` isn't in
+      # scope here.
       Logger.warning("webhook failed: #{inspect(reason)}")
       send_resp(conn, 200, "")
   end
@@ -48,11 +50,13 @@ def handle_webhook(conn, body, signature) do
     event <- Jason.decode(payload)
     account <- Accounts.fetch_by_customer(event["customer"])
     subscription <- Subscriptions.fetch(account, event["subscription"])
-    applied <- Subscriptions.apply_event(subscription, event)
+    updated <- Subscriptions.apply_event(subscription, event)
+    notified <- Notifications.subscription_changed(account, updated)
   end
   |> execute()
   |> case do
-    {:ok, _results} ->
+    {:ok, %{event: event, notified: notified}} ->
+      Logger.info("webhook #{event["id"]} applied, notification #{notified.id} sent")
       send_resp(conn, 200, "")
 
     {:error, :payload, _reason, _results} ->
@@ -71,6 +75,7 @@ end
 When a step fails, you get this:
 
 ```elixir
+# Subscriptions.fetch/2 returned {:error, :not_found}
 {:error, :subscription, :not_found, %{
   body: "...",
   signature: "...",
@@ -80,7 +85,9 @@ When a step fails, you get this:
 }}
 ```
 
-You match on the step, not the shape of the error. The earlier results are right there, for logging, error messages or cleanup. On success you get every result, not just the last one.
+The tuple holds the step's name, the reason from its `{:error, reason}`, and every result before it.
+
+You match on the step, not the shape of the error. The earlier results are right there, for logging, error messages or cleanup. On success you get all of them too, as a map you can log, return or pass on.
 
 The steps are the same calls as in the `with`. No wrappers, no `{:ok, _}` patterns. Q has no dependencies.
 
@@ -174,7 +181,7 @@ The block builds the queue but doesn't run it. Pipe it into `execute/1`. That le
 
 ## Errors, exceptions and side effects
 
-A `<-` step fails when it returns `{:error, reason}` or `:error`. So functions like `Base.decode64/1` and `Map.fetch/2` work as steps without wrapping. A bare `:error` is reported with `:error` as the reason. Functions that return a plain value work too; the value is stored as is.
+A `<-` step fails when it returns `{:error, reason}` or `:error`. So functions like `Base.decode64/1` and `Map.fetch/2` work as steps without wrapping. The error tuple holds `reason` itself, not `{:error, reason}`; a bare `:error` gives `:error` as the reason. Functions that return a plain value work too; the value is stored as is.
 
 The results hold whatever your steps returned, including tokens and personal data. Pick what you log.
 

@@ -35,8 +35,8 @@ defmodule Q.MixProject do
 
   defp description do
     """
-    Q provides powerful pipeline composition inspired by Ecto.Multi,
-    preserving intermediate results for visibility into your pipeline's state, including when a step returns an error.
+    A `with` that remembers: you get the result of every step, and when one fails,
+    its name, its error and everything before it.
     """
   end
 
