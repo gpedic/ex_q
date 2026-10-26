@@ -35,7 +35,7 @@ defmodule Q.MixProject do
 
   defp description do
     """
-    A `with` that remembers: you get the result of every step, and when one fails,
+    A with that remembers: you get the result of every step, and when one fails,
     its name, its error and everything before it.
     """
   end

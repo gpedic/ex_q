@@ -3,8 +3,8 @@ defmodule Q do
   A `with` that remembers: a chain of named steps, run with `execute/1`, that keeps every
   step's result.
 
-  Every step's result is stored in a state map under the step's name. When a step returns an error,
-  `execute/1` returns the failing step's name and error together with the state built so far.
+  Each step's result is stored under the step's name. When a step fails, `execute/1` returns
+  the step's name, its error and the results of every step before it.
 
   ## Writing a pipeline
 
@@ -32,15 +32,16 @@ defmodule Q do
   A step written with `<-` must return one of:
 
     * `{:ok, value}` - stores `value` under the step's name and continues
-    * `{:error, reason}` - stops; `execute/1` returns `{:error, name, reason, state}`
+    * `{:error, reason}` - stops; `execute/1` returns `{:error, step, reason, results}`
     * `:error` - same as `{:error, :error}`, for functions such as `Base.decode64/1`
     * `{:halt, value}` - stores `value` and stops the queue it's written in; `execute/1`
-      returns `{:ok, state}`
+      returns `{:ok, results}`
     * a queue - runs it as a child, see below
     * any other value - stores it under the step's name as is
 
-  So `<-` works for functions that return plain values too. Returning the result of
-  executing a queue instead of the queue itself raises.
+  So `<-` works for functions that return plain values too. Returning the error tuple of
+  a failed `execute/1` instead of the queue itself raises: return the queue, so it runs as
+  a child.
 
   A step written with `=` can't fail or halt: whatever its expression returns is stored as
   is, without unwrapping, so `{:ok, 1}` is stored as `{:ok, 1}`. Only an exception stops it.
@@ -49,17 +50,16 @@ defmodule Q do
   fail.
 
   Exceptions raised by step functions propagate unchanged, including exceptions in child
-  queues. They aren't converted into error tuples, and Q doesn't attach accumulated state
-  to them. This applies to both `run/4` (`<-`) and `let/4` (`=`) steps.
+  queues. They aren't converted into error tuples, and Q doesn't attach the results to
+  them. This applies to both `run/4` (`<-`) and `let/4` (`=`) steps.
 
-  Q does not automatically roll back completed operations. Stopping a queue after an error,
-  exception or halt leaves earlier side effects in place. Applications must manage their
-  own transaction boundaries or compensating actions where required.
+  Q doesn't roll back completed steps. After an error, exception or halt, the side effects
+  of earlier steps stay in place, and undoing them is up to you.
 
   ## Child queues
 
-  A function that returns a queue runs it as a child, with its own state starting empty,
-  and the child's result map is stored under the step's name. The child's step names stay
+  A function that returns a queue runs it as a child, starting with no results, and the
+  child's results are stored as a map under the step's name. The child's step names stay
   separate from the parent's, so a queue built by a function can be reused anywhere:
 
       queue bind: [id] do
@@ -70,7 +70,7 @@ defmodule Q do
       end
 
   If a child step fails, the parent step fails with the child's error tuple as the reason:
-  `{:error, :billing, {:error, :charge, :declined, %{...}}, %{id: ..., user: ...}}`. A halt
+  `{:error, :billing, {:error, :invoice, :declined, %{...}}, %{id: ..., user: ...}}`. A halt
   stops the queue it's written in, as `{:halt, acc}` stops the `Enum.reduce_while/3` it's
   in: a halt in a child ends the child, and the parent stores the child's results so far,
   continues, and can halt in turn based on them. To store a queue as a value instead of
@@ -78,17 +78,17 @@ defmodule Q do
 
   ## The functional API
 
-  `queue/1` compiles to these functions, which are also public:
+  A `queue` block compiles to these functions, which are also public:
 
     * `put/3` stores a value.
     * `run/4` runs a function that can fail, like `<-`.
     * `let/4` runs a function that can't fail, like `=`.
-    * `debug/2` prints the state.
+    * `debug/2` prints the results so far.
 
   Both build the same queue, run with `execute/1`, and share the result and error shapes,
   child queues and halts. A queue built either way can be a child step of the other.
 
-  The DSL gives compile-time checks (a misspelled step reference, an outside variable that
+  The `queue` block gives compile-time checks (a misspelled step reference, an outside variable that
   wasn't bound, a step bound twice), inputs inferred from the expression, and inline
   nesting.
 
@@ -96,13 +96,13 @@ defmodule Q do
   (`Q.run(q, {:invite, id}, fn -> invite(id) end, [])` inside `Enum.reduce/3`); names that
   aren't variables; steps chosen from data; queues built across functions or on a condition
   known when the queue is built; and explicit control over inputs. A step function receives
-  the values of the keys listed in its `params`. Omitting `params` passes the whole state as
-  one argument; explicit `[]` passes no queue inputs. These rules apply to both functions
+  the results of the steps listed in its `params`. Omitting `params` passes all results so
+  far as one map; explicit `[]` passes no queue inputs. These rules apply to both functions
   and MFAs. See `run/4` for `{module, function, args}`.
 
   The functional API is checked when the step is added: a wrong arity, an unknown param, an
   invalid name or a duplicate name raise `ArgumentError` before anything runs, but only once
-  that code runs. Use the DSL whenever the pipeline is written out in code.
+  that code runs. Use a `queue` block whenever the pipeline is written out in code.
 
   Every step has a unique name and stores its successful result. Names are atoms, such as
   `:user`, or tuples, such as `{:invite, user_id}`. The atoms `nil`, `true`, `false` and `:_`
@@ -112,18 +112,22 @@ defmodule Q do
   alias __MODULE__
   defstruct operations: [], names: MapSet.new()
   @opaque t :: %__MODULE__{operations: [operation], names: MapSet.t()}
+  @typedoc "The results: each step's result, stored under the step's name."
   @type state :: map
   @typedoc """
   An atom or tuple identifying a step. The atoms `nil`, `true`, `false` and `:_` are excluded.
   """
   @type name :: atom | tuple
+  @typedoc """
+  The return values a `run/4` step treats specially. Any other value is stored as is.
+  """
   @type result ::
           {:ok, any}
           | {:error, any}
           | :error
           | {:halt, any}
           | t
-  @type step_fun :: (... -> result)
+  @type step_fun :: (... -> result | any)
   @type fun_mfa :: {module, atom, [any]} | {module, atom}
   @type params :: [name] | {[name], [order: :prepend | :append]}
   @typep kind :: :put | :run | :let | :debug
@@ -153,7 +157,7 @@ defmodule Q do
   Adds a step that stores `value` under `name`.
 
   Returns a new queue with the step added; queues are immutable. When the queue runs, the
-  step stores `value` in the state under `name`, where later steps can use it.
+  step stores `value` under `name`, where later steps can use it.
 
   ## Params
 
@@ -211,9 +215,9 @@ defmodule Q do
   end
 
   @doc """
-  Adds an operation to the queue that, when executed, prints the current state of the queue.
+  Adds an operation that prints the results so far when execution reaches it.
 
-  A child queue prints its own state. Printing or filtering never changes the pipeline's
+  In a child queue, it prints the child's results. Printing or filtering never changes the
   results.
 
   The printing is performed using Elixir's `IO.inspect/2`. The Q-specific `:only` option
@@ -221,10 +225,10 @@ defmodule Q do
   names that aren't present are omitted. Remaining options, such as `:label`, are passed
   to `IO.inspect/2` after removing `:only`.
 
-  In a `queue/1` block, options are evaluated once whenever execution reaches the debug
-  statement, can reference earlier steps, and aren't evaluated after an error or halt. Functional options are validated when added with `debug/2`;
-  DSL options are validated when evaluated. Invalid options or selections raise
-  `ArgumentError`.
+  In a `queue` block, options are evaluated each time execution reaches the debug
+  statement, can reference earlier steps, and aren't evaluated after an error or halt.
+  Options passed to `debug/2` are validated when added; options in a `queue` block when
+  they're evaluated. Invalid options or selections raise `ArgumentError`.
 
   ## Params
 
@@ -239,22 +243,20 @@ defmodule Q do
     add_op(queue, {:debug, validate_debug_opts!(opts)})
   end
 
-  # The DSL evaluates the options expression only when this operation is reached.
+  # A queue block evaluates the options expression only when this operation is reached.
   @doc false
   def __debug__(%Q{} = queue, fun, params) do
     add_op(queue, {:debug, {:deferred, build_call!(queue, fun, params)}})
   end
 
   @doc """
-  Executes the queue, running all operations in the order they were added.
+  Runs the queue's steps in order and returns `{:ok, results}`.
 
-  Each operation is provided with the state of the queue as of the start of the operation.
-  If an operation function returns an error, execution stops and the error tuple includes
-  the accumulated results. Exceptions propagate unchanged, including from child queues;
-  Q does not convert them into error tuples or attach accumulated results to them.
+  When a step fails, execution stops and returns `{:error, step, reason, results}`, with
+  the results of the steps before it. Exceptions propagate unchanged, including from child
+  queues; Q doesn't turn them into error tuples or attach the results to them.
 
-  Completed side effects are not automatically rolled back after an error, exception or
-  halt. Applications must provide any required transactions or compensating actions.
+  Q doesn't roll back completed steps after an error, exception or halt.
 
   ## Example
       iex> Q.new()
@@ -272,9 +274,9 @@ defmodule Q do
   end
 
   @doc """
-  Adds a step whose function receives the whole accumulated state as one argument.
+  Adds a step whose function receives all results so far as one map.
 
-  MFA fixed arguments follow the state. Use `run/4` with `[]` for no queue inputs, or
+  MFA fixed arguments follow the results. Use `run/4` with `[]` for no queue inputs, or
   with a list of names to receive specific results. See `run/4` for the return contract.
   """
   @doc group: "Functional API"
@@ -284,32 +286,29 @@ defmodule Q do
   end
 
   @doc """
-  Adds a function to be executed as part of the queue.
+  Adds a step that runs a function, like `<-` in a `queue` block.
 
-  This function enables adding operations to the queue that are executed when `execute/1` is called.
-  The operations can be anonymous functions or functions in a module.
-
-  The function should return either `{:ok, value}` if the operation was successful or
-  `{:error, reason}` if the operation failed. Functions can also return `{:halt, value}` to
-  halt execution at any point, or a queue to run it as a child with its results stored under
-  `name`. Any other value is stored under `name` as is. See the module documentation for the
-  complete contract.
+  The function's return value decides what happens next: `{:ok, value}` stores `value`
+  under `name`; `{:error, reason}` or `:error` stops the queue; `{:halt, value}` stores
+  `value` and stops the queue with success; a queue runs as a child, with its results
+  stored under `name`; and any other value is stored as is. See the module documentation.
 
   ## Params
 
-  - `queue`: The queue to which the function should be added.
-  - `name`: A unique atom or tuple for this operation, used as a key in the state. See `t:name/0` for exclusions.
-  - `fun`: The function to be run. It can be an anonymous function, a `{module, function}` tuple
-    or a `{module, function, args}` tuple.
-  - `params` (optional): A list of keys in the queue's internal state that should be passed to the
-    function as arguments, or a `{keys, opts}` tuple. Omitting it passes the whole state;
+  - `queue`: The queue to add the step to.
+  - `name`: A unique atom or tuple; the step's result is stored under it. See `t:name/0` for
+    exclusions.
+  - `fun`: The function to run: an anonymous function, a `{module, function}` tuple or a
+    `{module, function, args}` tuple.
+  - `params` (optional): The names of earlier steps whose results are passed to the function
+    as arguments, or a `{names, opts}` tuple. Omitting it passes all results so far;
     explicit `[]` passes no queue inputs.
 
   ## Function input
 
-  - Without `params`, the function receives the whole state as one argument.
+  - Without `params`, the function receives all results so far as one map.
   - With `[]` (or `{[], opts}`), no queue inputs are passed.
-  - With named `params`, the function receives the values of those keys, in order.
+  - With named `params`, the function receives the results of those steps, in order.
   - These rules apply to both functions and MFAs. `{module, function, args}` functions
     receive `args` as well; see the `:order` option. With `[]`, only these fixed arguments
     are passed.
@@ -319,9 +318,9 @@ defmodule Q do
 
   ## Options
 
-  - `:order` - for `{module, function, args}` steps, whether the values of `keys` go before
+  - `:order` - for `{module, function, args}` steps, whether the inputs go before
     (`:prepend`, the default) or after (`:append`) `args`. Passing it with a function or
-    capture raises `ArgumentError`: a function receives its inputs in the order of `keys`.
+    capture raises `ArgumentError`: a function receives its inputs in the order of `params`.
 
   ## Example
       iex> Q.new()
@@ -337,9 +336,9 @@ defmodule Q do
   end
 
   @doc """
-  Adds a plain-value step whose function receives the whole accumulated state.
+  Adds a plain-value step whose function receives all results so far as one map.
 
-  The return value is stored unchanged. MFA fixed arguments follow the state. Use
+  The return value is stored unchanged. MFA fixed arguments follow the results. Use
   `let/4` with `[]` for no queue inputs, or with names to receive specific results.
   """
   @doc group: "Functional API"
@@ -377,7 +376,7 @@ defmodule Q do
     * `name <- expr` - a step whose result decides what happens next: `{:ok, value}` is
       unwrapped, `{:error, reason}` or `:error` stops the pipeline, `{:halt, value}` ends
       it; any other value is stored as is (compiles to `run/4`)
-    * `debug()` or `debug(opts)` - prints the state, see `debug/2`
+    * `debug()` or `debug(opts)` - prints the results so far, see `debug/2`
 
   Rules:
 
@@ -403,8 +402,8 @@ defmodule Q do
 
     * `bind:` - a list of outside values to bring in, each becoming one of the queue's
       first steps. A bare variable is bound under its own name; a `name: expr` pair binds
-      the value of any expression. The values are evaluated when the block is built, so
-      they're in the state like any step, including in error tuples.
+      the value of any expression. The values are evaluated when the block is built, and
+      they're stored like any step, including in error tuples.
 
   ## Example
       iex> import Q
@@ -537,7 +536,7 @@ defmodule Q do
     if arity != expected do
       context =
         case input do
-          :state -> "to receive the whole state (pass [] for no queue inputs)"
+          :state -> "to receive all results (pass [] for no queue inputs)"
           :none -> "for params []"
           {:keys, keys} -> "for params #{Kernel.inspect(keys)}"
         end

@@ -126,21 +126,20 @@ def deps do
 end
 ```
 
-Upgrading from 1.x? See the [changelog](CHANGELOG.md). Full documentation is at [hexdocs.pm/ex_q](https://hexdocs.pm/ex_q).
+Q requires Elixir 1.15 or later. Upgrading from 1.x? See the [changelog](CHANGELOG.md). Full documentation is at [hexdocs.pm/ex_q](https://hexdocs.pm/ex_q).
 
 ## Writing steps
 
-Each line in a `queue` block is a step. The variable names it.
+Every step in a `queue` block is a binding, and the variable names the step.
 
 ```elixir
 queue bind: [input] do
+  # = can't fail: the value is stored as is, never unwrapped
+  trimmed = String.trim(input)
+
   # <- can fail: {:ok, value} is unwrapped, {:error, reason} or :error stops
   # the queue, {:halt, value} ends it early, anything else is stored as is
-  trimmed <- String.trim(input)
   decoded <- Base.decode64(trimmed)
-
-  # = can't fail: the value is stored as is, never unwrapped
-  limit = 100
 
   # Steps run for their side effects get a name too
   notified <- Notifier.notify(decoded)
@@ -171,7 +170,7 @@ Bound values are evaluated when the block is built, and they're stored like any 
 
 ### Building and running
 
-The block builds the queue but doesn't run it. Pipe it into `execute/1`. That lets a function return a queue and leave it to the caller to run it, or to use it as a [sub-pipeline](#sub-pipelines).
+The block builds the queue but doesn't run it. Pipe it into `Q.execute/1`. That lets a function return a queue and leave it to the caller to run it, or to use it as a [child queue](#child-queues).
 
 ### Rules
 
@@ -220,7 +219,7 @@ end
 
 The step always runs, so it's always in the results and later steps can use it. If the branch that runs returns an error or a halt, the queue stops as usual.
 
-For several steps in one branch, return a queue. It runs as a [sub-pipeline](#sub-pipelines):
+For several steps in one branch, return a queue. It runs as a [child queue](#child-queues):
 
 ```elixir
 approval <-
@@ -262,9 +261,9 @@ end
 {:ok, %{request: %{key: "BWBeN28Vb7cMEx7Ym8AUzs", ...}, cached: :not_found, processed: %{...}, stored: ...}}
 ```
 
-A halt stops the queue it's in, the way `{:halt, acc}` stops `Enum.reduce_while/3`. In a [sub-pipeline](#sub-pipelines), it stops only the sub-pipeline. The parent keeps the child's results and carries on.
+A halt stops the queue it's in, the way `{:halt, acc}` stops `Enum.reduce_while/3`. In a [child queue](#child-queues), it stops only the child. The parent keeps the child's results and carries on.
 
-## Sub-pipelines
+## Child queues
 
 A step that returns a queue runs it as a child. The child's results are stored as a map under the step's name. Its step names don't clash with the parent's, so a function that builds a queue can be reused anywhere:
 
@@ -300,7 +299,7 @@ end
 # }}
 ```
 
-Both children have a `validated` step, with no conflict. A child starts with an empty state, so it binds what it needs, like `user` above. You can also nest a block inline: `billing <- queue bind: [user] do ... end`.
+Both children have a `validated` step, with no conflict. A child starts with no results, so it binds what it needs, like `user` above. You can also nest a block inline: `billing <- queue bind: [user] do ... end`.
 
 If a child step fails, the parent step fails too. Its reason is the child's error tuple, with the child's results:
 
@@ -326,13 +325,13 @@ end
 # after b: %{a: 1}
 ```
 
-Options can use earlier steps, and are evaluated when execution reaches `debug`. In a child queue, it prints only the child's results. See `debug/2`.
+Options can use earlier steps, and are evaluated when execution reaches `debug`. In a child queue, it prints only the child's results. See `Q.debug/2`.
 
 ## Building queues from data
 
-A `queue` block compiles to plain function calls in `Q`, and you can use them directly. Both build the same queue and run with `execute/1`. Results, errors, child queues and halts work the same, and you can mix the two.
+A `queue` block compiles to the functional API in `Q`, which you can use directly. Both build the same queue and run with `Q.execute/1`. Results, errors, child queues and halts work the same, and you can mix the two.
 
-The block gives you compile-time checks, inferred inputs and inline nesting. The functions give you what a block can't do.
+The block gives you compile-time checks, inferred inputs and inline nesting. The functional API gives you what a block can't do.
 
 **A step per item**, named after the item, so you see which one failed:
 
@@ -350,7 +349,8 @@ end)
 **Steps chosen from data**, so the error names the check that failed:
 
 ```elixir
-checks = [email: &valid_email?/1, age: &adult?/1, country: &supported_country?/1]
+# Each check returns {:ok, value} or {:error, reason}
+checks = [email: &check_email/1, age: &check_age/1, country: &check_country/1]
 
 checks
 |> Enum.reduce(Q.new() |> Q.put(:user, user), fn {name, check}, q ->
@@ -358,7 +358,7 @@ checks
 end)
 |> Q.execute()
 
-# {:error, :age, :underage, %{user: ..., email: true}}
+# {:error, :age, :underage, %{user: ..., email: "joe@example.com"}}
 ```
 
 **Queues built across functions**, or with steps added conditionally:
@@ -376,7 +376,7 @@ Step names are atoms or tuples, like `{:invite, id}`. `nil`, `true`, `false` and
 
 ### Inputs and step functions
 
-`put/3` stores a value. `run/4` is `<-` and `let/4` is `=`. Instead of being inferred, inputs are listed: `decoded <- Base.decode64(trimmed)` becomes `Q.run(q, :decoded, &Base.decode64/1, [:trimmed])`. Leaving params out and passing `[]` are different:
+`Q.put/3` stores a value. `Q.run/4` is `<-` and `Q.let/4` is `=`. Instead of being inferred, inputs are listed: `decoded <- Base.decode64(trimmed)` becomes `Q.run(q, :decoded, &Base.decode64/1, [:trimmed])`. Leaving params out and passing `[]` are different:
 
 | Params | Inputs |
 |---|---|
@@ -395,8 +395,8 @@ Q.new()
 # {:ok, %{encoded: "aGVsbG8", decoded: "hello"}}
 ```
 
-See `run/4`, `let/4`, `put/3` and `debug/2` for details.
+See `Q.run/4`, `Q.let/4`, `Q.put/3` and `Q.debug/2` for details.
 
 ### When mistakes are caught
 
-The block is checked at compile time. A typo in a step name, an unbound outside variable or a duplicate step is a compile error. The functions check each step as it's added: a wrong arity, an unknown param, a bad name or a duplicate raises `ArgumentError`, but only when that code runs. That's the cost of building from data. If you can write the pipeline out in code, use the block.
+The block is checked at compile time. A typo in a step name, an unbound outside variable or a duplicate step is a compile error. The functional API checks each step as it's added: a wrong arity, an unknown param, a bad name or a duplicate raises `ArgumentError`, but only when that code runs. That's the cost of building from data. If you can write the pipeline out in code, use the block.
