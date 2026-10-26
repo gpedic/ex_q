@@ -176,7 +176,15 @@ end
 {:ok, %{request: %{key: "BWBeN28Vb7cMEx7Ym8AUzs", ...}, cached: :not_found, processed: %{...}, stored: ...}}
 ```
 
-A halt stops the whole pipeline, also from inside a [sub-pipeline](#sub-pipelines). Return `{:halt, value, propagate: false}` to stop only the queue the step is in.
+A halt stops the queue it's written in, as `{:halt, acc}` stops the `Enum.reduce_while/3` it's in. Inside a [sub-pipeline](#sub-pipelines) it ends the sub-pipeline; the parent continues with the child's results so far, and can halt in turn based on them:
+
+```elixir
+queue bind: [key] do
+  lookup <- cache_lookup(key)        # a sub-pipeline that halts on a hit
+  done <- if lookup.hit, do: {:halt, lookup.hit}, else: {:ok, nil}
+  computed <- compute(key)
+end
+```
 
 ## Branching
 
@@ -241,7 +249,7 @@ If a child step fails, the parent step fails and the reason is the child's error
 {:error, :billing, {:error, :invoice, :declined, %{user: ..., validated: ...}}, %{id: ..., user: ...}}
 ```
 
-To store a queue as a value instead of running it, use `=` or return `{:ok, queue}`.
+To store a queue as a value instead of running it, use `=` or return `{:ok, queue}`. A halt in a child ends only the child; see [Halting execution early](#halting-execution-early).
 
 ## Debugging
 

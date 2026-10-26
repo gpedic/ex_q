@@ -295,12 +295,12 @@ defmodule Q.DSLTest do
                 %{name: "joe", greeting: %{name: "joe", text: "hello joe", upper: "HELLO JOE"}}}
     end
 
-    test "a child halt with propagate: false lets the parent continue" do
+    test "a child's halt lets the parent continue" do
       result =
         queue do
           cached <-
             queue do
-              hit <- {:halt, :cached, propagate: false}
+              hit <- {:halt, :cached}
               never = raise("should not run")
             end
 
@@ -311,7 +311,7 @@ defmodule Q.DSLTest do
       assert {:ok, %{cached: %{hit: :cached}, after_child: :ran}} = result
     end
 
-    test "a local halt inside a branch stops the child, not just the branch" do
+    test "a halt inside a branch stops the child, not just the branch" do
       result =
         queue do
           cached <-
@@ -319,7 +319,7 @@ defmodule Q.DSLTest do
               enabled = true
 
               if enabled do
-                hit <- {:halt, :cached, propagate: false}
+                hit <- {:halt, :cached}
                 never_in_branch = raise("branch must stop")
               end
 

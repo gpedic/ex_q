@@ -738,7 +738,7 @@ defmodule QTest do
                {:error, :outer, {:error, :middle, {:error, :inner, :deep, %{b: 2}}, %{a: 1}}, %{}}
     end
 
-    test "a child halt stops the parent too, keeping the partial results at each level" do
+    test "a halt ends only the queue it's in; the ancestors continue" do
       result =
         Q.new()
         |> Q.put(:top, 0)
@@ -764,17 +764,23 @@ defmodule QTest do
         |> Q.put(:never, :top)
         |> Q.execute()
 
-      assert result == {:ok, %{top: 0, outer: %{a: 1, middle: %{b: 2, stop: :early}}}}
+      assert result ==
+               {:ok,
+                %{
+                  top: 0,
+                  outer: %{a: 1, middle: %{b: 2, stop: :early}, never: :outer},
+                  never: :top
+                }}
     end
 
-    test "a halt with propagate: false stops only the child" do
+    test "a child's halt stops only the child" do
       result =
         Q.new()
         |> Q.run(
           :cache,
           fn ->
             Q.new()
-            |> Q.run(:lookup, fn -> {:halt, :hit, propagate: false} end, [])
+            |> Q.run(:lookup, fn -> {:halt, :hit} end, [])
             |> Q.put(:never, true)
           end,
           []
@@ -797,7 +803,7 @@ defmodule QTest do
               fn ->
                 Q.new()
                 |> Q.put(:before_halt, true)
-                |> Q.run(:stop, fn -> {:halt, :done, propagate: false} end, [])
+                |> Q.run(:stop, fn -> {:halt, :done} end, [])
                 |> Q.let(:never, fn -> raise "grandchild must stop" end, [])
               end,
               []
@@ -820,23 +826,33 @@ defmodule QTest do
                 }}
     end
 
-    test "propagate: true is a plain halt, and both forms are the same at the top level" do
-      child = fn -> Q.new() |> Q.run(:stop, fn -> {:halt, :early, propagate: true} end, []) end
+    test "the parent decides from the child's results whether to halt in turn" do
+      lookup = fn hit ->
+        Q.new()
+        |> Q.run(:hit, fn -> if hit, do: {:halt, :cached}, else: {:ok, nil} end, [])
+        |> Q.put(:searched, true)
+      end
 
-      assert Q.new() |> Q.run(:child, child, []) |> Q.put(:never, true) |> Q.execute() ==
-               {:ok, %{child: %{stop: :early}}}
+      decide = fn lookup -> if lookup.hit, do: {:halt, lookup.hit}, else: {:ok, nil} end
 
-      local = fn -> {:halt, :early, propagate: false} end
+      run = fn hit ->
+        Q.new()
+        |> Q.run(:lookup, fn -> lookup.(hit) end, [])
+        |> Q.run(:done, decide, [:lookup])
+        |> Q.put(:computed, true)
+        |> Q.execute()
+      end
 
-      assert Q.new() |> Q.run(:stop, local, []) |> Q.put(:never, true) |> Q.execute() ==
-               {:ok, %{stop: :early}}
+      assert run.(true) == {:ok, %{lookup: %{hit: :cached}, done: :cached}}
+
+      assert run.(false) ==
+               {:ok, %{lookup: %{hit: nil, searched: true}, done: nil, computed: true}}
     end
 
-    test "a malformed halt raises rather than being stored" do
-      for bad <- [{:halt, 1, :bogus}, {:halt, 1, other: true}, {:halt, 1, propagate: :yes}] do
-        assert_raise RuntimeError, ~r/expected step :step to halt with/, fn ->
-          Q.new() |> Q.run(:step, fn -> bad end, []) |> Q.execute()
-        end
+    test "a 3-tuple starting with :halt is a plain value" do
+      for value <- [{:halt, 1, :extra}, {:halt, 1, propagate: false}] do
+        assert Q.new() |> Q.run(:step, fn -> value end, []) |> Q.put(:next, true) |> Q.execute() ==
+                 {:ok, %{step: value, next: true}}
       end
     end
 

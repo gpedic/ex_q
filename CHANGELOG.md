@@ -34,7 +34,7 @@ Also new in the block:
 - `if`, `unless`, `case` and `cond` around steps choose which steps run, based on earlier results.
 - Every step must have a unique name and stores its successful result, including names starting with `_`. Bare `_` bindings are rejected at compile time.
 - A step whose function returns a queue runs it as a sub-pipeline, with its results stored as a map under the step's name; `name <- queue do ... end` nests a block inline.
-- A halt stops the whole pipeline, also from inside a sub-pipeline; `{:halt, value, propagate: false}` stops only the queue the step is in.
+- A halt stops the queue it's written in, like `{:halt, acc}` in `Enum.reduce_while/3`: in a sub-pipeline it ends the sub-pipeline, and the parent continues with the child's results so far, deciding from them whether to halt in turn.
 - Mistakes, such as binding a name twice or a malformed `if`, `unless`, `case` or `cond` (a missing `do:`, an unknown or duplicate option, no `->` clauses, the wrong number of arguments), are compile errors pointing at the line.
 - The docs compare the DSL and the functional API: what each is for, and when mistakes are caught.
 
@@ -43,7 +43,7 @@ Also new in the block:
 New:
 
 - **`let/4`**: a step for functions that can't fail. The return value is stored as is, so `let(:upper, &String.upcase/1, [:text])` needs no `{:ok, _}` wrapping.
-- **Child queues**: a `run/4` function may return a queue, which runs as a child with its result map stored under the step's name. A failing child step is reported as `{:error, step, {:error, child_step, reason, child_state}, state}`. A child's halt stops the parent too, unless it is `{:halt, value, propagate: false}`.
+- **Child queues**: a `run/4` function may return a queue, which runs as a child with its result map stored under the step's name. A failing child step is reported as `{:error, step, {:error, child_step, reason, child_state}, state}`. A child's halt ends only the child; the parent continues with the child's results.
 - **Arity-0 steps**: pass explicit `[]` to call a function or MFA with no queue inputs. In a `queue` block, the DSL generates this list automatically.
 - **Step functions are validated when added**: a function's arity must match its params, and a `{module, function, args}` function must exist. Mistakes raise `ArgumentError` when the step is added instead of failing when the pipeline runs.
 
