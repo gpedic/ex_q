@@ -19,6 +19,12 @@ defmodule Q.DSL do
   @conditionals [:if, :unless, :case, :cond]
   @special_forms [:__MODULE__, :__ENV__, :__DIR__, :__CALLER__, :__STACKTRACE__]
 
+  @bindings "in a queue block, steps are bindings named by their variable: " <>
+              "`name = expr` for values and functions that can't fail, `name <- expr` for " <>
+              "functions that return {:ok, value} or {:error, reason}, and debug() to print " <>
+              "the results. For a step per item or a computed name, build the queue with " <>
+              "Q.new/0 and Q.run/4 instead of a block"
+
   def compile(opts, block, caller) do
     # One context per block, so a nested block can't see the enclosing block's
     # variables. The line is unique enough: a nested block opens on a later line
@@ -182,14 +188,19 @@ defmodule Q.DSL do
     )
   end
 
+  # Calls shaped like the functional API (or Ecto.Multi), and the 1.x block syntax
   defp compile_statement({name, meta, args}, _steps, env)
        when name in @old_calls and is_list(args) do
+    compile_error!(env, meta, "#{name}/#{length(args)} is not a queue statement; " <> @bindings)
+  end
+
+  defp compile_statement({{:., _, [{:__aliases__, _, [:Q]}, name]}, meta, args}, _steps, env)
+       when is_list(args) do
     compile_error!(
       env,
       meta,
-      "#{name}/#{length(args)} is not a queue statement since Q 2.0, steps are bindings: " <>
-        "`name = expr` for values and functions that can't fail, `name <- expr` for " <>
-        "functions that return {:ok, value} or {:error, reason}, and debug() to print the state"
+      "Q.#{name}/#{length(args)} builds a queue outside a block, it isn't a queue statement; " <>
+        @bindings
     )
   end
 
@@ -210,11 +221,26 @@ defmodule Q.DSL do
        when is_atom(name) and is_atom(context),
        do: name
 
+  # `{:ok, user} <- fetch(id)` is the `with` habit; <- does the unwrapping itself
+  defp step_name!({:ok, {name, _meta, context}} = lhs, op, meta, env)
+       when is_atom(name) and is_atom(context) do
+    name = if name == :_, do: "name", else: Atom.to_string(name)
+
+    compile_error!(
+      env,
+      meta,
+      "expected a variable on the left of #{op}, got: #{Macro.to_string(lhs)}; " <>
+        "<- unwraps {:ok, value} itself, so write `#{name} <- expr`"
+    )
+  end
+
   defp step_name!(lhs, op, meta, env) do
     compile_error!(
       env,
       meta,
-      "expected a variable on the left of #{op}, got: #{Macro.to_string(lhs)}"
+      "expected a variable on the left of #{op}, got: #{Macro.to_string(lhs)}; " <>
+        "a step is named by a single variable, so bind the whole value and take it " <>
+        "apart in the steps that use it"
     )
   end
 

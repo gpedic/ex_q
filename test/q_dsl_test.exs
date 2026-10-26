@@ -611,6 +611,22 @@ defmodule Q.DSLTest do
     test "a pattern on the left" do
       error = compile_error("queue do\n  {a, b} = {1, 2}\nend")
       assert error.description =~ "expected a variable on the left of =, got: {a, b}"
+      assert error.description =~ "a step is named by a single variable"
+    end
+
+    test "an {:ok, var} pattern on the left points at <-" do
+      for op <- ["<-", "="] do
+        error = compile_error("queue do\n  {:ok, user} #{op} {:ok, 1}\nend")
+
+        assert error.description ==
+                 "expected a variable on the left of #{op}, got: {:ok, user}; " <>
+                   "<- unwraps {:ok, value} itself, so write `user <- expr`"
+
+        assert error.line == 4
+      end
+
+      error = compile_error("queue do\n  {:ok, _} <- {:ok, 1}\nend")
+      assert error.description =~ "so write `name <- expr`"
     end
 
     test "binding a name twice" do
@@ -629,11 +645,25 @@ defmodule Q.DSLTest do
       end
     end
 
-    test "1.x style calls point at the new syntax" do
+    test "calls shaped like the functional API point at bindings" do
       for call <- ["put(:a, 1)", "run(:a, &f/1, [:b])", "let(:a, &f/1)", "inspect()"] do
         error = compile_error("queue do\n  #{call}\nend")
-        assert error.description =~ "is not a queue statement since Q 2.0"
+
+        assert error.description =~
+                 "is not a queue statement; in a queue block, steps are bindings"
+
+        refute error.description =~ "2.0"
       end
+    end
+
+    test "Q function calls inside a block point at bindings" do
+      error = compile_error("queue do\n  Q.run(Q.new(), :a, fn -> 1 end, [])\nend")
+
+      assert error.description =~
+               "Q.run/4 builds a queue outside a block, it isn't a queue statement; " <>
+                 "in a queue block, steps are bindings"
+
+      assert error.description =~ "build the queue with Q.new/0 and Q.run/4 instead of a block"
     end
   end
 end

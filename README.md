@@ -126,7 +126,11 @@ def deps do
 end
 ```
 
-Q requires Elixir 1.15 or later. Upgrading from 1.x? See the [changelog](CHANGELOG.md). Full documentation is at [hexdocs.pm/ex_q](https://hexdocs.pm/ex_q).
+Q requires Elixir 1.15 or later. Upgrading from 1.x? See the [changelog](CHANGELOG.md). Full documentation is at [hexdocs.pm/ex_q](https://hexdocs.pm/ex_q), and the [recipes](guides/recipes.md) show complete patterns, with failure and cleanup paths, for common tasks.
+
+### Using Q with coding agents
+
+The package ships [`usage-rules.md`](usage-rules.md), a short list of rules and common mistakes for coding agents. Tools such as the [usage_rules](https://hex.pm/packages/usage_rules) package can sync it into your project's `AGENTS.md` or `CLAUDE.md`, so agents see it without having to look.
 
 ## Writing steps
 
