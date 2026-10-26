@@ -168,9 +168,9 @@ The block builds the queue but doesn't run it. Pipe it into `execute/1`. That le
 
 ### Rules
 
-* Each statement is a step (`name = expr` or `name <- expr`), `debug()`, or a conditional with steps inside.
+* Each statement is a step (`name = expr` or `name <- expr`) or `debug()`. Conditionals go inside a step; see [Conditional steps](#conditional-steps).
 * The left side is a single variable, bound once. Bare `_` isn't allowed; `_name` is a normal step and its result is stored.
-* Mistakes, like a malformed `if` or `case`, are compile errors pointing at the line.
+* Mistakes, like binding a name twice, are compile errors pointing at the line.
 
 ## Errors, exceptions and side effects
 
@@ -198,24 +198,34 @@ If creating the receipt fails, the card has been charged. The error tuple has wh
   {:error, reason}
 ```
 
-## Branching
+## Conditional steps
 
-Wrap steps in `if`, `unless`, `case` or `cond` to choose what runs:
+Put the conditional inside the step, as you would with `x = if ...`:
 
 ```elixir
 queue bind: [order] do
   total <- Orders.total(order)
-
-  if total > 100 do
-    approval <- Approvals.request(order)
-  end
-
-  charged <- Payments.charge(order)
+  approval <- if total > 100, do: Approvals.request(order), else: {:ok, nil}
+  charged <- Payments.charge(order, approval)
 end
 |> execute()
 ```
 
-Steps in the branch that runs are added to the results. An error or halt in them stops the queue. As with ordinary Elixir variables, a step bound in a branch can't be used after it.
+The step always runs, so it's always in the results and later steps can use it. If the branch that runs returns an error or a halt, the queue stops as usual.
+
+For several steps in one branch, return a queue. It runs as a [sub-pipeline](#sub-pipelines):
+
+```elixir
+approval <-
+  if total > 100 do
+    queue bind: [order] do
+      requested <- Approvals.request(order)
+      notified <- Managers.notify(requested)
+    end
+  else
+    {:ok, nil}
+  end
+```
 
 ## Halting early
 
@@ -309,13 +319,13 @@ end
 # after b: %{a: 1}
 ```
 
-Options can use earlier steps, and are evaluated when execution reaches `debug`. In a conditional it sees the enclosing queue's results; in a child, only the child's. See `debug/2`.
+Options can use earlier steps, and are evaluated when execution reaches `debug`. In a child queue, it prints only the child's results. See `debug/2`.
 
 ## Building queues from data
 
 A `queue` block compiles to plain function calls in `Q`, and you can use them directly. Both build the same queue and run with `execute/1`. Results, errors, child queues and halts work the same, and you can mix the two.
 
-The block gives you compile-time checks, inferred inputs, branching and inline nesting. The functions give you what a block can't do.
+The block gives you compile-time checks, inferred inputs and inline nesting. The functions give you what a block can't do.
 
 **A step per item**, named after the item, so you see which one failed:
 
@@ -382,4 +392,4 @@ See `run/4`, `let/4`, `put/3` and `debug/2` for details.
 
 ### When mistakes are caught
 
-The block is checked at compile time. A typo in a step name, an unbound outside variable, a duplicate step or a malformed `if` or `case` is a compile error. The functions check each step as it's added: a wrong arity, an unknown param, a bad name or a duplicate raises `ArgumentError`, but only when that code runs. That's the cost of building from data. If you can write the pipeline out in code, use the block.
+The block is checked at compile time. A typo in a step name, an unbound outside variable or a duplicate step is a compile error. The functions check each step as it's added: a wrong arity, an unknown param, a bad name or a duplicate raises `ArgumentError`, but only when that code runs. That's the cost of building from data. If you can write the pipeline out in code, use the block.

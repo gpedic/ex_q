@@ -31,11 +31,11 @@ Also new in the block:
 - The block only builds the queue; pipe it into `execute/1` to run it. `execute()` and `exec()` inside the block are compile errors, so a function that returns a queue can't run it by accident before its caller runs it as a sub-pipeline.
 - A block is a scope of its own, like `quote`: steps can't use variables from outside it, so a misspelled step reference is a compile error even when a variable of that name exists. Outside values come in with `queue bind: [order, limit: opts[:limit]] do`; a bare variable binds under its own name, `name: expr` binds any expression, and each becomes one of the queue's first steps, in the state and in error tuples. A nested block binds what it needs from the enclosing one.
 - `name <- expr` is a step whose result decides what happens next: `{:ok, value}` is unwrapped, `{:error, reason}` or `:error` stops the pipeline, `{:halt, value}` ends it, a queue runs as a child, and any other value is stored as is, so `<-` works for functions that return plain values. `name = expr` is a step that can't fail: the value is stored as is, never unwrapped. Reading a block, `<-` marks the steps that can fail. The same rule applies to `run/4` and `let/4`.
-- `if`, `unless`, `case` and `cond` around steps choose which steps run, based on earlier results.
 - Every step must have a unique name and stores its successful result, including names starting with `_`. Bare `_` bindings are rejected at compile time.
 - A step whose function returns a queue runs it as a sub-pipeline, with its results stored as a map under the step's name; `name <- queue do ... end` nests a block inline.
 - A halt stops the queue it's written in, like `{:halt, acc}` in `Enum.reduce_while/3`: in a sub-pipeline it ends the sub-pipeline, and the parent continues with the child's results so far, deciding from them whether to halt in turn.
-- Mistakes, such as binding a name twice or a malformed `if`, `unless`, `case` or `cond` (a missing `do:`, an unknown or duplicate option, no `->` clauses, the wrong number of arguments), are compile errors pointing at the line.
+- Conditionals go inside a step and choose its value: `approval <- if total > 100, do: request(order), else: {:ok, nil}`. An `if`, `unless`, `case` or `cond` as a statement of its own is a compile error.
+- Mistakes, such as binding a name twice, are compile errors pointing at the line.
 - The docs compare the DSL and the functional API: what each is for, and when mistakes are caught.
 
 ### Functional API
@@ -49,7 +49,7 @@ New:
 
 Breaking:
 
-- **Debugging follows queue scope and execution timing.** Inside inline conditionals, `debug()` now includes earlier enclosing results; named children remain isolated. DSL debug options are evaluated only when reached and may reference earlier steps. Options must be a keyword list and `only:` must contain valid step names; invalid options or selections raise `ArgumentError` when added through the functional API or evaluated in the DSL. `nil` and `false` selections no longer print the whole state. The `only:` option is removed before forwarding inspection options.
+- **Debugging follows execution timing.** DSL debug options are evaluated only when reached and may reference earlier steps. Options must be a keyword list and `only:` must contain valid step names; invalid options or selections raise `ArgumentError` when added through the functional API or evaluated in the DSL. `nil` and `false` selections no longer print the whole state. The `only:` option is removed before forwarding inspection options.
 - **Omitted params and explicit `[]` are distinct**, for both `run` and `let`, functions and MFAs. Omitting params passes the whole state as one argument; `[]` or `{[], opts}` passes no queue inputs. MFA fixed arguments are still passed. If a callback needs the whole state, omit params instead of passing `[]`; zero-argument callbacks must supply `[]` explicitly. Named params continue passing the listed values in order.
 - **Step names must be atoms or tuples**, such as `:user` or `{:invite, user_id}`. Lists, strings, numbers and other terms, as well as `nil`, `true` and `false`, now raise `ArgumentError` when the step is added. Wrap dynamic identifiers in a tuple, for example `{:item, id}`.
 - **Bare `:_` step names are rejected** with `ArgumentError` when added through the functional API. Use a descriptive name instead. Underscore-prefixed names such as `:_notified` are ordinary unique names and retain their results.

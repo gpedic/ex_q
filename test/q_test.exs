@@ -881,42 +881,6 @@ defmodule QTest do
     end
   end
 
-  describe "__branch__/3" do
-    test "a hand-built branch that repeats a step name raises" do
-      assert_raise ArgumentError, ~r/step :a conflicts with a step of the same name/, fn ->
-        Q.new()
-        |> Q.put(:a, 1)
-        |> Q.__branch__(fn -> Q.new() |> Q.put(:a, 2) end, [])
-        |> Q.execute()
-      end
-
-      assert_raise ArgumentError, ~r/step :b conflicts with a step of the same name/, fn ->
-        Q.new()
-        |> Q.__branch__(fn -> Q.new() |> Q.put(:b, 1) end, [])
-        |> Q.put(:b, 2)
-        |> Q.execute()
-      end
-    end
-
-    test "a conflict prevents later branch steps from running" do
-      assert_raise ArgumentError, ~r/step :a conflicts/, fn ->
-        Q.new()
-        |> Q.put(:a, 1)
-        |> Q.__branch__(
-          fn ->
-            Q.new()
-            |> Q.put(:a, 2)
-            |> Q.let(:later, fn -> send(self(), :later_branch_step) end, [])
-          end,
-          []
-        )
-        |> Q.execute()
-      end
-
-      refute_received :later_branch_step
-    end
-  end
-
   describe "__to_list__/1" do
     test "returns a list of operations" do
       que =
