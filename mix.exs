@@ -2,7 +2,7 @@ defmodule Q.MixProject do
   use Mix.Project
 
   @name "Q"
-  @version "2.1.0"
+  @version "2.0.0"
   @url "https://github.com/gpedic/ex_q"
 
   def project do
@@ -17,6 +17,7 @@ defmodule Q.MixProject do
       package: package(),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
+      dialyzer: [plt_local_path: "priv/plts", plt_core_path: "priv/plts"],
       test_coverage: [tool: ExCoveralls]
     ]
   end
@@ -35,8 +36,8 @@ defmodule Q.MixProject do
 
   defp description do
     """
-    Q provides powerful pipeline composition inspired by Ecto.Multi,
-    preserving intermediate results for visibility into your pipeline's state, including when a step returns an error.
+    A with that remembers: you get the result of every step, and when one fails,
+    its name, its error and everything before it.
     """
   end
 
@@ -60,7 +61,7 @@ defmodule Q.MixProject do
   defp package do
     [
       name: :ex_q,
-      files: ["lib", "mix.exs", "README*", "CHANGELOG*", "LICENSE*"],
+      files: ["lib", "guides", "mix.exs", "README*", "CHANGELOG*", "LICENSE*", "usage-rules.md"],
       maintainers: ["Goran Pedić"],
       licenses: ["MIT"],
       links: %{"GitHub" => @url}
@@ -75,6 +76,8 @@ defmodule Q.MixProject do
       skip_undefined_reference_warnings_on: ["CHANGELOG.md"],
       extras: [
         "README.md": [title: "Overview"],
+        "guides/recipes.md": [title: "Recipes"],
+        "usage-rules.md": [title: "Rules for coding agents"],
         "CHANGELOG.md": [title: "Changelog"],
         LICENSE: [title: "License"]
       ],

@@ -91,6 +91,18 @@ defmodule Q.DSLTest do
       assert {:ok, %{input: "aGVsbG8=", decoded: "hello", upper: "HELLO"}} = result
     end
 
+    test "<- stores a plain value as is, = stores even a result whole" do
+      result =
+        queue do
+          trimmed <- String.trim("  hi ")
+          unwrapped <- {:ok, 1}
+          whole = {:ok, 1}
+        end
+        |> execute()
+
+      assert result == {:ok, %{trimmed: "hi", unwrapped: 1, whole: {:ok, 1}}}
+    end
+
     test "a failing step is named after its variable" do
       result =
         queue do
@@ -230,27 +242,9 @@ defmodule Q.DSLTest do
       end
     end
 
-    test "underscore-prefixed names cannot repeat or be rebound in a branch" do
-      for body <- [
-            "_sent = 1\n  _sent <- {:ok, 2}",
-            "_sent = 1\n  if true, do: _sent = 2",
-            "if true, do: _sent = 1\n  _sent = 2"
-          ] do
-        error = compile_error("queue do\n  #{body}\nend")
-        assert error.description == "_sent is already a step in this queue"
-      end
-    end
-
-    test "a branch retains underscore-prefixed results" do
-      result =
-        queue do
-          if true do
-            _approved <- {:ok, true}
-          end
-        end
-        |> execute()
-
-      assert result == {:ok, %{_approved: true}}
+    test "underscore-prefixed names cannot repeat" do
+      error = compile_error("queue do\n  _sent = 1\n  _sent <- {:ok, 2}\nend")
+      assert error.description == "_sent is already a step in this queue"
     end
 
     test "a failure still names the step" do
@@ -310,12 +304,12 @@ defmodule Q.DSLTest do
                 %{name: "joe", greeting: %{name: "joe", text: "hello joe", upper: "HELLO JOE"}}}
     end
 
-    test "a child halt with propagate: false lets the parent continue" do
+    test "a child's halt lets the parent continue" do
       result =
         queue do
           cached <-
             queue do
-              hit <- {:halt, :cached, propagate: false}
+              hit <- {:halt, :cached}
               never = raise("should not run")
             end
 
@@ -325,57 +319,10 @@ defmodule Q.DSLTest do
 
       assert {:ok, %{cached: %{hit: :cached}, after_child: :ran}} = result
     end
-
-    test "a local halt inside a branch stops the child, not just the branch" do
-      result =
-        queue do
-          cached <-
-            queue do
-              enabled = true
-
-              if enabled do
-                hit <- {:halt, :cached, propagate: false}
-                never_in_branch = raise("branch must stop")
-              end
-
-              never_in_child = raise("child must stop")
-            end
-
-          after_child = :ran
-        end
-        |> execute()
-
-      assert result == {:ok, %{cached: %{enabled: true, hit: :cached}, after_child: :ran}}
-    end
   end
 
   describe "debug scope and evaluation" do
-    test "nested conditionals share their enclosing queue's accumulated state" do
-      output =
-        capture_io(fn ->
-          result =
-            queue do
-              a = 1
-
-              if a == 1 do
-                b = 2
-
-                case b do
-                  2 ->
-                    c = 3
-                    debug()
-                end
-              end
-            end
-            |> execute()
-
-          assert result == {:ok, %{a: 1, b: 2, c: 3}}
-        end)
-
-      assert {%{a: 1, b: 2, c: 3}, []} = Code.eval_string(output)
-    end
-
-    test "child branches see child state, while the parent sees the completed namespace" do
+    test "a child prints its own state, the parent everything including the child" do
       output =
         capture_io(fn ->
           result =
@@ -384,27 +331,21 @@ defmodule Q.DSLTest do
 
               child <-
                 queue do
-                  before_branch = 2
-
-                  if before_branch == 2 do
-                    inside_branch = 3
-                    debug()
-                  end
+                  a = 2
+                  b = 3
+                  debug()
                 end
 
               debug()
             end
             |> execute()
 
-          assert result ==
-                   {:ok, %{parent: 1, child: %{before_branch: 2, inside_branch: 3}}}
+          assert result == {:ok, %{parent: 1, child: %{a: 2, b: 3}}}
         end)
 
       [child_output, parent_output] = String.split(output, "\n", trim: true)
-      assert {%{before_branch: 2, inside_branch: 3}, []} = Code.eval_string(child_output)
-
-      assert {%{parent: 1, child: %{before_branch: 2, inside_branch: 3}}, []} =
-               Code.eval_string(parent_output)
+      assert {%{a: 2, b: 3}, []} = Code.eval_string(child_output)
+      assert {%{parent: 1, child: %{a: 2, b: 3}}, []} = Code.eval_string(parent_output)
     end
 
     test "options can use earlier steps and bound values" do
@@ -449,28 +390,6 @@ defmodule Q.DSLTest do
       end
     end
 
-    test "branch options can select earlier enclosing results" do
-      label = "enclosing"
-
-      output =
-        capture_io(fn ->
-          result =
-            queue bind: [label] do
-              selected = :a
-              a = 1
-
-              if a == 1 do
-                debug(only: selected, label: label)
-              end
-            end
-            |> execute()
-
-          assert result == {:ok, %{label: "enclosing", selected: :a, a: 1}}
-        end)
-
-      assert output == "enclosing: %{a: 1}\n"
-    end
-
     test "options are not evaluated after an earlier error or halt" do
       for {outcome, expected} <- [
             {{:error, :offline}, {:error, :stopped, :offline, %{outcome: {:error, :offline}}}},
@@ -493,18 +412,6 @@ defmodule Q.DSLTest do
       end
     end
 
-    test "options in an untaken branch are not evaluated or validated" do
-      queue =
-        queue do
-          if false do
-            debug(send(self(), :untaken_debug_options))
-          end
-        end
-
-      assert capture_io(fn -> assert execute(queue) == {:ok, %{}} end) == ""
-      refute_received :untaken_debug_options
-    end
-
     test "invalid deferred options are rejected only when reached" do
       for options <- [:invalid, %{}, [only: nil], [only: [:a, [:b]]]] do
         queue =
@@ -520,284 +427,72 @@ defmodule Q.DSLTest do
     end
   end
 
-  describe "branching" do
-    defp checkout(total) do
-      queue bind: [total] do
-        amount = total
-
-        if amount > 100 do
-          discount = div(amount, 10)
-          final = amount - discount
-        else
-          shipping = 5
-        end
-      end
-      |> execute()
-    end
-
-    test "if/else picks the steps from a result" do
-      assert {:ok, %{amount: 120, discount: 12, final: 108} = state} = checkout(120)
-      refute Map.has_key?(state, :shipping)
-      assert {:ok, %{amount: 50, shipping: 5}} = checkout(50)
-    end
-
-    test "if without else, and unless" do
-      run = fn flag ->
-        queue bind: [flag] do
-          on = flag
-          if on, do: yes = true
-          unless on, do: no = true
+  describe "conditionals" do
+    test "a conditional in a step chooses its value, which later steps can use" do
+      run = fn total ->
+        queue bind: [total] do
+          approval <- if total > 100, do: {:ok, :approved}, else: {:ok, nil}
+          charged = {total, approval}
         end
         |> execute()
       end
 
-      assert {:ok, %{on: true, yes: true} = state} = run.(true)
-      refute Map.has_key?(state, :no)
-      assert {:ok, %{on: false, no: true}} = run.(false)
+      assert {:ok, %{approval: :approved, charged: {120, :approved}}} = run.(120)
+      assert {:ok, %{approval: nil, charged: {50, nil}}} = run.(50)
     end
 
-    test "case binds pattern variables for its branch" do
-      run = fn input ->
-        queue bind: [input] do
-          result = input
+    test "a branch that fails or halts stops the queue" do
+      run = fn outcome ->
+        queue bind: [outcome] do
+          checked <-
+            case outcome do
+              :error -> {:error, :rejected}
+              :halt -> {:halt, :cached}
+            end
 
-          case result do
-            {:ok, n} -> doubled = n * 2
-            {:error, reason} -> failed = reason
-          end
+          never = raise "should not run"
         end
         |> execute()
       end
 
-      assert {:ok, %{doubled: 10}} = run.({:ok, 5})
-      assert {:ok, %{failed: :nope}} = run.({:error, :nope})
+      assert {:error, :checked, :rejected, %{outcome: :error}} = run.(:error)
+      assert {:ok, %{outcome: :halt, checked: :cached}} = run.(:halt)
     end
 
-    test "cond and nested conditionals" do
-      run = fn n ->
-        queue bind: [n] do
-          number = n
-
-          cond do
-            number < 0 ->
-              sign = :negative
-
-            number < 10 ->
-              sign = :small
-              if number == 0, do: zero = true
-
-            true ->
-              sign = :large
-          end
+    test "a branch that returns a queue runs it as a child" do
+      run = fn total ->
+        queue bind: [total] do
+          approval <-
+            if total > 100 do
+              queue bind: [total] do
+                requested = {:request, total}
+                notified = {:notified, requested}
+              end
+            else
+              {:ok, nil}
+            end
         end
         |> execute()
       end
 
-      assert {:ok, %{sign: :negative}} = run.(-1)
-      assert {:ok, %{sign: :small, zero: true}} = run.(0)
-      assert {:ok, %{sign: :large}} = run.(10)
-      assert {:ok, %{sign: :small} = state} = run.(1)
-      refute Map.has_key?(state, :zero)
+      assert {:ok, %{approval: %{requested: {:request, 120}, notified: _}}} = run.(120)
+      assert {:ok, %{approval: nil}} = run.(50)
     end
 
-    test "a failing branch step names the step and keeps both states" do
-      result =
-        queue do
-          total = 120
+    test "a conditional statement is a compile error pointing at the step form" do
+      for {kind, code} <- [
+            if: "if a > 0, do: b = 2",
+            unless: "unless a > 0, do: b = 2",
+            case: "case a do\n    1 -> b = 2\n  end",
+            cond: "cond do\n    a > 0 -> b = 2\n  end"
+          ] do
+        error = malformed("queue do\n  a = 1\n  #{code}\nend")
 
-          if total > 100 do
-            request = {:approval, total}
-            approved <- {:error, :rejected}
-          end
+        assert error.description ==
+                 "#{kind} is not a queue statement; put it inside a step to choose the " <>
+                   "step's value, such as `name <- #{kind} ...`"
 
-          charged <- raise("should not run")
-        end
-        |> execute()
-
-      assert {:error, :approved, :rejected, %{total: 120, request: {:approval, 120}}} = result
-    end
-
-    test "a halt in a branch halts the pipeline" do
-      result =
-        queue do
-          cached = true
-          if cached, do: hit <- {:halt, :cached}
-          computed <- raise("should not run")
-        end
-        |> execute()
-
-      assert {:ok, %{cached: true, hit: :cached}} = result
-    end
-
-    test "compiles to a branch" do
-      q =
-        queue do
-          a = 1
-          if a > 0, do: b = 2
-        end
-
-      assert [let: :a, branch: nil] = Q.__to_list__(q)
-    end
-  end
-
-  describe "malformed conditionals" do
-    test "an unknown if option" do
-      error = malformed("queue do\n  if false, do: approved = true, els: rejected = true\nend")
-      assert error.description == "unknown if option :els; supported options are :do and :else"
-      assert error.line == 3
-    end
-
-    test "if or unless without do:" do
-      error = malformed("queue do\n  if true, then: approved = true\nend")
-      assert error.description == "if requires a do: block"
-      assert error.line == 3
-
-      error = malformed("queue do\n  a = 1\n  unless a > 0, else: b = 2\nend")
-      assert error.description == "unless requires a do: block"
-      assert error.line == 4
-    end
-
-    test "a duplicate option" do
-      error = malformed("queue do\n  if true, do: a = 1, do: b = 2\nend")
-      assert error.description == "duplicate if option :do"
-    end
-
-    test "the wrong number of arguments" do
-      cases = [
-        {"if(true)", "if expects 2 arguments (an expression and a do: block), got 1"},
-        {"if(true, [do: (a = 1)], :extra)",
-         "if expects 2 arguments (an expression and a do: block), got 3"},
-        {"unless(false)", "unless expects 2 arguments (an expression and a do: block), got 1"},
-        {"unless(false, [do: (a = 1)], :extra)",
-         "unless expects 2 arguments (an expression and a do: block), got 3"},
-        {"case(:ok)", "case expects 2 arguments (an expression and a do: block), got 1"},
-        {"case(:ok, [do: nil], :extra)",
-         "case expects 2 arguments (an expression and a do: block), got 3"},
-        {"cond()", "cond expects 1 argument (a do: block), got 0"},
-        {"cond([do: nil], :extra)", "cond expects 1 argument (a do: block), got 2"}
-      ]
-
-      for {code, expected} <- cases do
-        error = malformed("queue do\n  #{code}\nend")
-        assert error.description == expected
-        assert error.line == 3
-      end
-    end
-
-    test "case and cond without clauses" do
-      error = malformed("queue do\n  case :ok do\n  end\nend")
-      assert error.description == "case requires at least one -> clause"
-      assert error.line == 3
-
-      error = malformed("queue do\n  cond do\n  end\nend")
-      assert error.description == "cond requires at least one -> clause"
-    end
-
-    test "case and cond bodies without -> clauses" do
-      error = malformed("queue do\n  case :ok do\n    a = 1\n  end\nend")
-
-      assert error.description ==
-               "expected case clauses in the form `pattern -> steps`, got: a = 1"
-
-      assert error.line == 4
-
-      error = malformed("queue do\n  cond do\n    a = 1\n  end\nend")
-
-      assert error.description ==
-               "expected cond clauses in the form `condition -> steps`, got: a = 1"
-
-      assert error.line == 4
-    end
-
-    test "malformed bodies without metadata use the conditional's line" do
-      for conditional <- ["case :ok", "cond"] do
-        error = malformed("queue do\n  #{conditional} do\n    true\n  end\nend")
-        assert error.description =~ "clauses in the form"
-        assert error.line == 3
-      end
-    end
-
-    test "an unknown case option" do
-      error =
-        malformed("queue do\n  case :ok do\n    :ok -> a = 1\n  else\n    b = 2\n  end\nend")
-
-      assert error.description == "unknown case option :else; supported options are :do"
-    end
-
-    test "a malformed clause is reported at its own line" do
-      # The parser can't produce this, but a macro can
-      clauses = [
-        {:->, [line: 3], [[:ok], {:=, [line: 3], [{:a, [line: 3], nil}, 1]}]},
-        {:oops, [line: 4], nil}
-      ]
-
-      ast =
-        {:__block__, [],
-         [
-           quote(do: import(Q, only: [queue: 1])),
-           {:queue, [line: 1], [[do: {:case, [line: 2], [:ok, [do: clauses]]}]]}
-         ]}
-
-      error =
-        assert_raise CompileError, fn -> Code.eval_quoted(ast, [], file: "malformed.exs") end
-
-      assert error.description ==
-               "expected case clauses in the form `pattern -> steps`, got: oops"
-
-      assert error.line == 4
-    end
-
-    test "a malformed conditional nested in a branch" do
-      code = """
-      queue do
-        a = 1
-
-        case a do
-          1 ->
-            if a > 0, do: b = 2, els: c = 3
-        end
-      end
-      """
-
-      error = malformed(code)
-      assert error.description == "unknown if option :els; supported options are :do and :else"
-      assert error.line == 7
-    end
-
-    test "valid forms still compile and run" do
-      result =
-        queue do
-          n = 5
-
-          case n do
-            m when m > 3 -> big = true
-            _ -> small = true
-          end
-
-          if n > 10 do
-          end
-
-          unless n > 10, do: low = true
-          if n > 0, do: positive = true, else: nil
-        end
-        |> execute()
-
-      assert {:ok, %{n: 5, big: true, low: true, positive: true} = state} = result
-      refute Map.has_key?(state, :small)
-    end
-
-    test "options Q accepts but Elixir doesn't are still rejected, by Elixir" do
-      # else: before do: passes Q's checks; the options are kept as written, so
-      # Elixir's own if rejects them instead of Q silently reordering them
-      assert_raise ArgumentError, ~r/keys for if/, fn ->
-        Code.eval_string("""
-        import Q, only: [queue: 1]
-
-        queue do
-          a = 1
-          if a > 0, else: b = 2, do: c = 3
-        end
-        """)
+        assert error.line == 4
       end
     end
   end
@@ -874,7 +569,7 @@ defmodule Q.DSLTest do
     end
 
     test "an outside variable in a condition is a compile error" do
-      assert undefined_in_block("queue do\n  total = 5\n  if total > limit, do: big = true\nend") =~
+      assert undefined_in_block("queue do\n  total = 5\n  big = if total > limit, do: true\nend") =~
                ~s(undefined variable "limit")
     end
 
@@ -929,7 +624,9 @@ defmodule Q.DSLTest do
     test "zero arguments and guards" do
       assert execute(Pipelines.constant()) == {:ok, %{answer: 42}}
       assert execute(Pipelines.guarded(2)) == {:ok, %{n: 2, doubled: 4}}
-      assert_raise FunctionClauseError, fn -> Pipelines.guarded(:two) end
+      # Called through apply/3, as the type checker rightly rejects a direct call
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      assert_raise FunctionClauseError, fn -> apply(Pipelines, :guarded, [:two]) end
     end
 
     test "defpq defines a private function" do
@@ -942,55 +639,55 @@ defmodule Q.DSLTest do
                {:ok, %{name: "joe", inner: %{x: "joe", hidden: "joe"}}}
     end
 
-    test "arguments must be plain variables" do
+    test "arguments must be plain variables, and the error says what to do instead" do
       for {arg, expected} <- [
-            {"%{id: id}", "defq arguments must be plain variables, got: %{id: id}"},
-            {"a \\\\ 1", "defq arguments must be plain variables, got: a \\\\ 1"},
-            {"_", "defq arguments must be named; _ cannot be an input"}
+            {"%{id: id}",
+             "defq arguments must be plain variables, got: %{id: id}; each argument becomes " <>
+               "a step named after its variable, so take the value apart in the steps that use it"},
+            {"a \\\\ 1",
+             "defq arguments must be plain variables, got: a \\\\ 1; for a default, define " <>
+               "another function that calls this one with it"},
+            {"_",
+             "defq arguments must be named; _ cannot be an input, since each argument becomes " <>
+               "a step named after its variable"}
           ] do
         error = compile_error("defmodule BadArgs do\n  defq f(#{arg}) do\n    b = 1\n  end\nend")
         assert error.description == expected
       end
 
       error = compile_error("defmodule BadHead do\n  defpq 1 do\n    b = 1\n  end\nend")
-      assert error.description == "expected a function head after defpq, got: 1"
+
+      assert error.description ==
+               "expected a function head after defpq, got: 1; write `defpq name(arg) do ... end`"
+    end
+
+    test "a queue block inside a defq body points at writing the steps directly" do
+      error =
+        compile_error("""
+        defmodule NestedBody do
+          defq f(x) do
+            queue bind: [x] do
+              y = x
+            end
+          end
+        end
+        """)
+
+      assert error.description =~ "a queue block is not a queue statement"
+      assert error.description =~ "A defq body is already a queue block"
+    end
+
+    test "the body follows the queue block rules" do
+      error =
+        compile_error(
+          "defmodule BadBody do\n  defq f(x) do\n    {:ok, y} <- {:ok, x}\n  end\nend"
+        )
+
+      assert error.description =~ "so write `y <- expr`"
     end
   end
 
   describe "compile errors" do
-    test "a branch step isn't a variable after the conditional" do
-      diagnostics =
-        capture_io(:stderr, fn ->
-          compile_error("""
-          queue do
-            a = 1
-            if a > 0, do: b = 2
-            c = b
-          end
-          """)
-        end)
-
-      assert diagnostics =~ ~s(undefined variable "b")
-    end
-
-    test "a branch rebinding an outer step" do
-      error = compile_error("queue do\n  a = 1\n  if a > 0, do: a = 2\nend")
-      assert error.description =~ "a is already a step in this queue"
-    end
-
-    test "rebinding a step bound in a branch" do
-      error = compile_error("queue do\n  a = 1\n  if a > 0, do: b = 2\n  b = 3\nend")
-      assert error.description =~ "b is already a step in this queue"
-    end
-
-    test "execute() or exec() inside a branch" do
-      for name <- [:execute, :exec] do
-        error = compile_error("queue do\n  a = 1\n  if a > 0, do: #{name}()\nend")
-        assert error.description =~ "#{name}() is not a queue statement"
-        assert error.line == 5
-      end
-    end
-
     test "a bare expression" do
       error = compile_error("queue do\n  a = 1\n  IO.puts(a)\nend")
       assert error.description =~ "expected a step such as `name = expr`"
@@ -1014,6 +711,22 @@ defmodule Q.DSLTest do
     test "a pattern on the left" do
       error = compile_error("queue do\n  {a, b} = {1, 2}\nend")
       assert error.description =~ "expected a variable on the left of =, got: {a, b}"
+      assert error.description =~ "a step is named by a single variable"
+    end
+
+    test "an {:ok, var} pattern on the left points at <-" do
+      for op <- ["<-", "="] do
+        error = compile_error("queue do\n  {:ok, user} #{op} {:ok, 1}\nend")
+
+        assert error.description ==
+                 "expected a variable on the left of #{op}, got: {:ok, user}; " <>
+                   "<- unwraps {:ok, value} itself, so write `user <- expr`"
+
+        assert error.line == 4
+      end
+
+      error = compile_error("queue do\n  {:ok, _} <- {:ok, 1}\nend")
+      assert error.description =~ "so write `name <- expr`"
     end
 
     test "binding a name twice" do
@@ -1032,11 +745,25 @@ defmodule Q.DSLTest do
       end
     end
 
-    test "1.x style calls point at the new syntax" do
+    test "calls shaped like the functional API point at bindings" do
       for call <- ["put(:a, 1)", "run(:a, &f/1, [:b])", "let(:a, &f/1)", "inspect()"] do
         error = compile_error("queue do\n  #{call}\nend")
-        assert error.description =~ "is not a queue statement since Q 2.0"
+
+        assert error.description =~
+                 "is not a queue statement; in a queue block, steps are bindings"
+
+        refute error.description =~ "2.0"
       end
+    end
+
+    test "Q function calls inside a block point at bindings" do
+      error = compile_error("queue do\n  Q.run(Q.new(), :a, fn -> 1 end, [])\nend")
+
+      assert error.description =~
+               "Q.run/4 builds a queue outside a block, it isn't a queue statement; " <>
+                 "in a queue block, steps are bindings"
+
+      assert error.description =~ "build the queue with Q.new/0 and Q.run/4 instead of a block"
     end
   end
 end

@@ -47,16 +47,11 @@ defmodule QTest do
       assert {:ok, %{}} = Q.new() |> Q.execute()
     end
 
-    test "raises for unexpected returns" do
-      q =
-        Q.new()
-        |> Q.run(:bad_return, fn _ -> {:bad, 1} end)
-
-      assert_raise RuntimeError,
-                   ~r/^expected step :bad_return to return {:ok, value}, {:error, reason}, :error, {:halt, value}, {:halt, value, propagate: boolean} or a queue, got: {:bad, 1}$/,
-                   fn ->
-                     Q.execute(q)
-                   end
+    test "a run step stores a return value that isn't a result as is" do
+      for value <- [{:bad, 1}, nil, 42, "text", {:ok, 1, 2}, [ok: 1]] do
+        assert Q.new() |> Q.run(:plain, fn -> value end, []) |> Q.execute() ==
+                 {:ok, %{plain: value}}
+      end
     end
 
     test "callback exceptions propagate unchanged and leave completed effects in place" do
@@ -743,7 +738,7 @@ defmodule QTest do
                {:error, :outer, {:error, :middle, {:error, :inner, :deep, %{b: 2}}, %{a: 1}}, %{}}
     end
 
-    test "a child halt stops the parent too, keeping the partial results at each level" do
+    test "a halt ends only the queue it's in; the ancestors continue" do
       result =
         Q.new()
         |> Q.put(:top, 0)
@@ -769,17 +764,23 @@ defmodule QTest do
         |> Q.put(:never, :top)
         |> Q.execute()
 
-      assert result == {:ok, %{top: 0, outer: %{a: 1, middle: %{b: 2, stop: :early}}}}
+      assert result ==
+               {:ok,
+                %{
+                  top: 0,
+                  outer: %{a: 1, middle: %{b: 2, stop: :early}, never: :outer},
+                  never: :top
+                }}
     end
 
-    test "a halt with propagate: false stops only the child" do
+    test "a child's halt stops only the child" do
       result =
         Q.new()
         |> Q.run(
           :cache,
           fn ->
             Q.new()
-            |> Q.run(:lookup, fn -> {:halt, :hit, propagate: false} end, [])
+            |> Q.run(:lookup, fn -> {:halt, :hit} end, [])
             |> Q.put(:never, true)
           end,
           []
@@ -802,7 +803,7 @@ defmodule QTest do
               fn ->
                 Q.new()
                 |> Q.put(:before_halt, true)
-                |> Q.run(:stop, fn -> {:halt, :done, propagate: false} end, [])
+                |> Q.run(:stop, fn -> {:halt, :done} end, [])
                 |> Q.let(:never, fn -> raise "grandchild must stop" end, [])
               end,
               []
@@ -825,23 +826,33 @@ defmodule QTest do
                 }}
     end
 
-    test "propagate: true is a plain halt, and both forms are the same at the top level" do
-      child = fn -> Q.new() |> Q.run(:stop, fn -> {:halt, :early, propagate: true} end, []) end
+    test "the parent decides from the child's results whether to halt in turn" do
+      lookup = fn hit ->
+        Q.new()
+        |> Q.run(:hit, fn -> if hit, do: {:halt, :cached}, else: {:ok, nil} end, [])
+        |> Q.put(:searched, true)
+      end
 
-      assert Q.new() |> Q.run(:child, child, []) |> Q.put(:never, true) |> Q.execute() ==
-               {:ok, %{child: %{stop: :early}}}
+      decide = fn lookup -> if lookup.hit, do: {:halt, lookup.hit}, else: {:ok, nil} end
 
-      local = fn -> {:halt, :early, propagate: false} end
+      run = fn hit ->
+        Q.new()
+        |> Q.run(:lookup, fn -> lookup.(hit) end, [])
+        |> Q.run(:done, decide, [:lookup])
+        |> Q.put(:computed, true)
+        |> Q.execute()
+      end
 
-      assert Q.new() |> Q.run(:stop, local, []) |> Q.put(:never, true) |> Q.execute() ==
-               {:ok, %{stop: :early}}
+      assert run.(true) == {:ok, %{lookup: %{hit: :cached}, done: :cached}}
+
+      assert run.(false) ==
+               {:ok, %{lookup: %{hit: nil, searched: true}, done: nil, computed: true}}
     end
 
-    test "other third elements of a halt are invalid returns" do
-      for bad <- [{:halt, 1, :bogus}, {:halt, 1, other: true}, {:halt, 1, propagate: :yes}] do
-        assert_raise RuntimeError, ~r/expected step :step to return/, fn ->
-          Q.new() |> Q.run(:step, fn -> bad end, []) |> Q.execute()
-        end
+    test "a 3-tuple starting with :halt is a plain value" do
+      for value <- [{:halt, 1, :extra}, {:halt, 1, propagate: false}] do
+        assert Q.new() |> Q.run(:step, fn -> value end, []) |> Q.put(:next, true) |> Q.execute() ==
+                 {:ok, %{step: value, next: true}}
       end
     end
 
@@ -867,42 +878,6 @@ defmodule QTest do
     test "is listed as a run step" do
       assert [run: :billing] =
                Q.new() |> Q.run(:billing, fn -> Q.new() end, []) |> Q.__to_list__()
-    end
-  end
-
-  describe "__branch__/3" do
-    test "a hand-built branch that repeats a step name raises" do
-      assert_raise ArgumentError, ~r/step :a conflicts with a step of the same name/, fn ->
-        Q.new()
-        |> Q.put(:a, 1)
-        |> Q.__branch__(fn -> Q.new() |> Q.put(:a, 2) end, [])
-        |> Q.execute()
-      end
-
-      assert_raise ArgumentError, ~r/step :b conflicts with a step of the same name/, fn ->
-        Q.new()
-        |> Q.__branch__(fn -> Q.new() |> Q.put(:b, 1) end, [])
-        |> Q.put(:b, 2)
-        |> Q.execute()
-      end
-    end
-
-    test "a conflict prevents later branch steps from running" do
-      assert_raise ArgumentError, ~r/step :a conflicts/, fn ->
-        Q.new()
-        |> Q.put(:a, 1)
-        |> Q.__branch__(
-          fn ->
-            Q.new()
-            |> Q.put(:a, 2)
-            |> Q.let(:later, fn -> send(self(), :later_branch_step) end, [])
-          end,
-          []
-        )
-        |> Q.execute()
-      end
-
-      refute_received :later_branch_step
     end
   end
 
@@ -1022,24 +997,6 @@ defmodule QTest do
       assert_raise ArgumentError, ~r":run is already a step in this queue", fn ->
         Q.new() |> Q.run(:run, fun) |> Q.run(:run, fun)
       end
-    end
-
-    test "returning invalid return value will raise and error" do
-      assert_raise RuntimeError,
-                   ~r/^expected step :bad_return to return {:ok, value}, {:error, reason}, :error, {:halt, value}, {:halt, value, propagate: boolean} or a queue, got: {:invalid, 1}$/,
-                   fn ->
-                     Q.new()
-                     |> Q.run(:bad_return, fn _ -> {:invalid, 1} end)
-                     |> Q.execute()
-                   end
-
-      assert_raise RuntimeError,
-                   ~r"expected step :empty to return {:ok, value}, {:error, reason}, :error, {:halt, value}, {:halt, value, propagate: boolean} or a queue, got: nil",
-                   fn ->
-                     Q.new()
-                     |> Q.run(:empty, fn _ -> nil end)
-                     |> Q.execute()
-                   end
     end
 
     test "passing an operation that is not a function or mfa tuple raises" do

@@ -5,129 +5,161 @@
 
 # Q
 
-Q is a tool for building and executing pipelines of operations, influenced by Ecto.Multi. It preserves intermediate results so that you retain clarity and visibility into your data transformations at each step. When a step returns an error, you can see precisely which step failed and what the state looked like at that point.
+Q is a `with` that remembers. You get the result of every step, and when one fails, its name, its error and everything before it.
 
-## Why Q?
+## The problem with `with`
 
-* **Keep error context**: when a step returns an error, Q returns all prior step results along with the failing step's name and error. Child failures include their own intermediate results in the nested error tuple.
-
-* **Plain Elixir**: steps are written like the bindings of a `with` chain. Q works out which earlier results each step needs, so step functions don't have to be wrapped or rewritten to fit the pipeline.
-
-* **Branch on results**: wrap steps in `if` or `case` to choose what runs next based on what earlier steps returned.
-
-## Example
+A webhook handler, written with `with`:
 
 ```elixir
-defmodule UploadProcessor do
-  import Q
+def handle_webhook(conn, body, signature) do
+  with {:ok, payload} <- Webhooks.verify(body, signature),
+       {:ok, event} <- Jason.decode(payload),
+       {:ok, account} <- Accounts.fetch_by_customer(event["customer"]),
+       {:ok, subscription} <- Subscriptions.fetch(account, event["subscription"]),
+       {:ok, updated} <- Subscriptions.apply_event(subscription, event),
+       {:ok, _} <- Notifications.subscription_changed(account, updated) do
+    send_resp(conn, 200, "")
+  else
+    {:error, :invalid_signature} ->
+      send_resp(conn, 401, "")
 
-  def process_upload(file_data) do
-    queue bind: [file: file_data] do
-      parsed <- DataProcessor.parse_csv(file)
-      validated <- validate_rows(parsed)
-      enriched <- DataProcessor.enrich_data(validated, use_ai: true)
-    end
-    |> execute()
-  end
+    {:error, %Jason.DecodeError{}} ->
+      send_resp(conn, 400, "")
 
-  defp validate_rows(rows) do
-    Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, acc} ->
-      case DataProcessor.validate_row(row) do
-        {:ok, valid} -> {:cont, {:ok, [valid | acc]}}
-        {:error, _} = err -> {:halt, err}
-      end
-    end)
+    {:error, reason} ->
+      # Was it the account or the subscription that wasn't found? Did applying the
+      # event fail, or the notification? And which event was it? `event` isn't in
+      # scope here.
+      Logger.warning("webhook failed: #{inspect(reason)}")
+      send_resp(conn, 200, "")
   end
 end
-
-# {:ok, %{file: ..., parsed: ..., validated: ..., enriched: ...}}
 ```
 
-The `queue` block is the usual way to write a pipeline, and it is checked when your code compiles. For pipelines built from data, such as a step per item, there is a functional API, checked when each step is added. See [The DSL and the functional API](#the-dsl-and-the-functional-api).
+Each `else` clause has to guess the step from the shape of the error. Both lookups return `{:error, :not_found}`, so you can't tell them apart. And the values you'd want to log are gone.
 
-## Error handling
-
-When a step returns an error, Q identifies the failing step and includes the results of every completed step before it.
+The same handler with Q:
 
 ```elixir
-def process_data(data) do
-  queue bind: [raw: data] do
-    decoded <- Jason.decode(raw)
-    validated <- validate_schema(decoded)
-    normalized <- normalize_data(validated)
-    enriched <- add_metadata(normalized)
+import Q
+
+def handle_webhook(conn, body, signature) do
+  queue bind: [body, signature] do
+    payload <- Webhooks.verify(body, signature)
+    event <- Jason.decode(payload)
+    account <- Accounts.fetch_by_customer(event["customer"])
+    subscription <- Subscriptions.fetch(account, event["subscription"])
+    updated <- Subscriptions.apply_event(subscription, event)
+    notified <- Notifications.subscription_changed(account, updated)
   end
   |> execute()
+  |> case do
+    {:ok, %{event: event, notified: notified}} ->
+      Logger.info("webhook #{event["id"]} applied, notification #{notified.id} sent")
+      send_resp(conn, 200, "")
+
+    {:error, :payload, _reason, _state} ->
+      send_resp(conn, 401, "")
+
+    {:error, :event, _reason, _state} ->
+      send_resp(conn, 400, "")
+
+    {:error, step, reason, %{event: event}} ->
+      Logger.warning("webhook #{event["id"]} failed at #{step}: #{inspect(reason)}")
+      send_resp(conn, 200, "")
+  end
 end
+```
 
-# If JSON parsing fails
-{:error, :decoded, %Jason.DecodeError{data: "invalid", position: 0, token: nil}, %{raw: "invalid"}}
+When a step fails, you get this:
 
-# If validation fails, the results of the previous steps are available
-{:error, :validated, :invalid_schema, %{
-  raw: "{\"foo\": 123}",
-  decoded: %{"foo" => 123}
+```elixir
+# Subscriptions.fetch/2 returned {:error, :not_found}
+{:error, :subscription, :not_found, %{
+  body: "...",
+  signature: "...",
+  payload: "...",
+  event: %{"id" => "evt_123", "customer" => "cus_456", ...},
+  account: %Account{id: 42, ...}
 }}
 ```
 
-Steps can return `{:error, reason}` or a bare `:error`, so functions like `Base.decode64/1` or `Map.fetch/2` work as steps without wrapping. A bare `:error` is reported as `{:error, step, :error, state}`.
+The tuple holds the step's name, the reason from its `{:error, reason}`, and the state: the result of every step before it, each under its step's name. The failing step has no result, so it isn't in the state.
 
-### Exceptions and side effects
+You match on the step, not the shape of the error. The earlier results are right there, for logging, error messages or cleanup. On success you get all of them too, as a map you can log, return or pass on.
 
-Exceptions raised by step functions propagate unchanged to the caller, including exceptions inside child queues. Q does not convert them into error tuples or attach accumulated results to them. This applies to both `<-` and `=` steps.
+The steps are the same calls as in the `with`. No wrappers, no `{:ok, _}` patterns. Q has no dependencies.
 
-Q does not automatically roll back completed operations. Stopping a queue after a returned error, raised exception or halt leaves earlier side effects in place:
+### What about tagging the `with` clauses?
+
+The usual fix is to tag each clause:
 
 ```elixir
-queue bind: [card] do
-  payment <- Payments.charge(card)
-  receipt <- Receipts.create(payment)
+with {:payload, {:ok, payload}} <- {:payload, Webhooks.verify(body, signature)},
+     {:event, {:ok, event}} <- {:event, Jason.decode(payload)},
+     {:account, {:ok, account}} <- {:account, Accounts.fetch_by_customer(event["customer"])},
+     ...
+else
+  {:account, {:error, :not_found}} ->
+    # The step is known now, but `event` is still out of scope
+end
+```
+
+Now you know the step. But every line got noisier, and the earlier results are still out of reach. To get them back, you'd thread a map through every clause by hand. That's what Q does.
+
+### When to use something else
+
+* **Database writes that must all succeed or all fail.** Use [`Ecto.Multi`](https://hexdocs.pm/ecto/Ecto.Multi.html) in a transaction. Q returns errors in the same shape, but doesn't roll anything back.
+* **Steps that need automatic undo on failure.** Use a saga library like [Sage](https://hex.pm/packages/sage).
+* **Two or three steps with distinct errors.** Plain `with` is fine.
+
+## Installation
+
+Add `ex_q` to your dependencies in `mix.exs`:
+
+```elixir
+def deps do
+  [
+    {:ex_q, "~> 2.0"}
+  ]
+end
+```
+
+Q requires Elixir 1.15 or later. Upgrading from 1.x? See the [changelog](CHANGELOG.md). Full documentation is at [hexdocs.pm/ex_q](https://hexdocs.pm/ex_q), and the [recipes](guides/recipes.md) show complete patterns, with failure and cleanup paths, for common tasks.
+
+### Using Q with coding agents
+
+The package ships [`usage-rules.md`](usage-rules.md), a short list of rules and common mistakes for coding agents. Tools such as the [usage_rules](https://hex.pm/packages/usage_rules) package can sync it into your project's `AGENTS.md` or `CLAUDE.md`, so agents see it without having to look.
+
+## Writing steps
+
+Every step in a `queue` block is a binding, and the variable names the step.
+
+```elixir
+queue bind: [input] do
+  # = can't fail: the value is stored as is, never unwrapped
+  trimmed = String.trim(input)
+
+  # <- can fail: {:ok, value} is unwrapped, {:error, reason} or :error stops
+  # the queue, {:halt, value} ends it early, anything else is stored as is
+  decoded <- Base.decode64(trimmed)
+
+  # Steps run for their side effects get a name too
+  notified <- Notifier.notify(decoded)
 end
 |> execute()
 ```
 
-If receipt creation returns an error or raises, the payment has already happened. Applications must explicitly manage transactions or compensating actions where required; the comparison to `Ecto.Multi` describes pipeline composition, not automatic transaction behavior.
+A step's inputs are the earlier steps it uses: `decoded` uses `trimmed`. Steps run in order, and each result is stored under the step's name.
 
-### Without Q
+Use `<-` when the result decides what happens next. Use `=` for everything else, including results you want to keep as they are, like `{:ok, pid}`. Reading a block, the `<-` steps are the ones that can fail.
 
-```elixir
-def process_data_without_q(data) do
-  with {:ok, decoded} <- Jason.decode(data),
-       {:ok, validated} <- validate_schema(decoded),
-       {:ok, normalized} <- normalize_data(validated),
-       {:ok, enriched} <- add_metadata(normalized) do
-    {:ok, enriched}
-  else
-    {:error, reason} ->
-      # We know the failure reason, but not which step failed,
-      # and the results of the earlier steps are gone
-      {:error, reason}
-  end
-end
-```
+Step names come from variables, so a block has a fixed set of steps. For a step per item, or names like `{:reserve, sku}`, see [Building queues from data](#building-queues-from-data).
 
-## Writing steps
+### Outside values
 
-Every step is a binding, and the variable names the step:
-
-```elixir
-# Outside values come in through bind:, as the queue's first steps
-queue bind: [input] do
-  # = stores the value of an expression: a value, or a function that can't fail
-  trimmed = String.trim(input)
-
-  # <- runs a function that returns {:ok, value}, {:error, reason} or :error,
-  # and stores the value
-  decoded <- Base.decode64(trimmed)
-
-  # Side-effect steps are named and their successful results are stored too
-  notified <- Notifier.notify(decoded)
-end
-```
-
-A step's inputs are the earlier steps its expression uses: `decoded <- Base.decode64(trimmed)` depends on `trimmed`. Steps run in order when the queue is executed, and each result is stored under the step's name.
-
-A block is a scope of its own, like `quote`: a step can't use variables from outside the block, so a misspelled step name is a compile error even when a variable of that name exists. Bring outside values in with `bind:`. A bare variable is bound under its own name, and `name: expr` binds any expression:
+A block is its own scope, like `quote`. Steps can't see variables from outside, so a typo in a step name is a compile error, even if an outside variable has that name. Bring values in with `bind:`. A bare variable keeps its name; `name: expr` binds any expression:
 
 ```elixir
 def settings(conn, opts) do
@@ -140,13 +172,97 @@ end
 # {:ok, %{opts: ..., current_user: ..., settings: ...}}
 ```
 
-Bound values are evaluated when the block is built. They're ordinary steps: in the state, and in the result and error tuples. Variables bound inside an expression, such as `fn` arguments and `case` patterns, work as usual.
+Bound values are evaluated when the block is built, and they're stored like any other step. Variables bound inside an expression, like `fn` arguments, work as usual.
 
-The block only builds the queue and returns it; pipe it into `execute/1` to run it. That way a function can build a queue and leave it to the caller whether to run it now or as a [sub-pipeline](#sub-pipelines).
+### Building and running
 
-## Halting execution early
+The block builds the queue but doesn't run it. Pipe it into `Q.execute/1`. That lets a function return a queue and leave it to the caller to run it, or to use it as a [child queue](#child-queues).
 
-A step can return `{:halt, value}` to end the pipeline successfully, skipping the remaining steps:
+### Functions that build a queue
+
+`defq` defines a function that returns a queue, with its arguments bound as the first steps:
+
+```elixir
+defq billing_steps(user) do
+  validated <- Billing.validate(user)
+  invoice <- Billing.invoice(validated)
+end
+
+billing_steps(user) |> execute()
+
+# {:ok, %{user: ..., validated: ..., invoice: ...}}
+```
+
+It's the same as a `def` whose body is `queue bind: [user] do ... end`, so the signature lists the queue's inputs. The arguments must be plain variables; guards are allowed. `defpq` defines a private one.
+
+Use `defq` for functions that build a queue, to run or to use as a [child queue](#child-queues). A function that runs the queue and handles the result, like the webhook handler above, stays a `def` with `queue ... |> execute()` inside.
+
+### Rules
+
+* Each statement is a step (`name = expr` or `name <- expr`) or `debug()`. Conditionals go inside a step; see [Conditional steps](#conditional-steps).
+* The left side is a single variable, bound once. Bare `_` isn't allowed; `_name` is a normal step and its result is stored.
+* Mistakes, like binding a name twice, are compile errors pointing at the line.
+
+## Errors, exceptions and side effects
+
+A `<-` step fails when it returns `{:error, reason}` or `:error`. So functions like `Base.decode64/1` and `Map.fetch/2` work as steps without wrapping. The error tuple holds `reason` itself, not `{:error, reason}`; a bare `:error` gives `:error` as the reason. Functions that return a plain value work too; the value is stored as is.
+
+The state holds whatever your steps returned, including tokens and personal data. Pick what you log.
+
+Exceptions aren't caught. They reach the caller unchanged, from child queues too, without the state attached.
+
+Q doesn't roll back. If a step fails, the steps before it have already happened:
+
+```elixir
+queue bind: [card] do
+  payment <- Payments.charge(card)
+  receipt <- Receipts.create(payment)
+end
+|> execute()
+```
+
+If creating the receipt fails, the card has been charged. The error tuple has what you need to refund it:
+
+```elixir
+{:error, :receipt, reason, %{payment: payment}} ->
+  Payments.refund(payment)
+  {:error, reason}
+```
+
+## Conditional steps
+
+Put the conditional inside the step, as you would with `x = if ...`:
+
+```elixir
+queue bind: [order] do
+  total <- Orders.total(order)
+  approval <- if total > 100, do: Approvals.request(order), else: {:ok, nil}
+  charged <- Payments.charge(order, approval)
+end
+|> execute()
+```
+
+The step always runs, so it's always in the state and later steps can use it. If the branch that runs returns an error or a halt, the queue stops as usual.
+
+Without an `else`, a false condition gives `nil`, which `<-` stores like any other value: `approval <- if total > 100, do: Approvals.request(order)` stores `nil` for small orders.
+
+For several steps in one branch, return a queue. It runs as a [child queue](#child-queues):
+
+```elixir
+approval <-
+  if total > 100 do
+    queue bind: [order] do
+      requested <- Approvals.request(order)
+      notified <- Managers.notify(requested)
+    end
+  else
+    {:ok, nil}
+  end
+```
+
+## Halting early
+
+A step can return `{:halt, value}` to finish early, with success:
 
 ```elixir
 def process_data(input) do
@@ -172,30 +288,20 @@ end
 {:ok, %{request: %{key: "BWBeN28Vb7cMEx7Ym8AUzs", ...}, cached: :not_found, processed: %{...}, stored: ...}}
 ```
 
-A halt stops the whole pipeline, also from inside a [sub-pipeline](#sub-pipelines). Return `{:halt, value, propagate: false}` to stop only the queue the step is in.
-
-## Branching
-
-Wrap steps in `if`, `unless`, `case` or `cond` to choose which steps run based on earlier results:
+The halting step's value is stored under its name, and the steps after it aren't in the state. `Q.execute/1` returns `{:ok, state}` either way, so to tell a halt from a full run, match on a key only one of them has:
 
 ```elixir
-queue bind: [order] do
-  total <- Orders.total(order)
-
-  if total > 100 do
-    approval <- Approvals.request(order)
-  end
-
-  charged <- Payments.charge(order)
+case process_data(input) do
+  {:ok, %{stored: _, processed: processed}} -> processed
+  {:ok, %{cached: cached}} -> cached
 end
-|> execute()
 ```
 
-Steps in the branch that runs are added to the result, and an error or halt in them stops the pipeline like any other step. As with variables in Elixir, a step bound inside a branch can't be used after the conditional.
+A halt stops the queue it's in, the way `{:halt, acc}` stops `Enum.reduce_while/3`. In a [child queue](#child-queues), it stops only the child. The parent stores the child's state and carries on.
 
-## Sub-pipelines
+## Child queues
 
-A step whose function returns a queue runs it as a child, and stores the child's results as a map under the step's name. The child's step names stay separate from the parent's, so a queue built by a function can be reused anywhere:
+A step that returns a queue runs it as a child. The child's state is stored under the step's name. Its step names don't clash with the parent's, so a function that builds a queue can be reused anywhere:
 
 ```elixir
 defq billing_steps(user) do
@@ -225,80 +331,51 @@ end
 # }}
 ```
 
-`defq` defines a function that builds a queue from its arguments: `defq billing_steps(user) do ... end` is `def billing_steps(user), do: queue bind: [user] do ... end`, so the signature is the pipeline's list of inputs. The arguments must be plain variables; guards are allowed. `defpq` defines a private one. Both children use `validated` without conflict. A child runs with its own state, so it binds its inputs. A block can also be nested inline: `billing <- queue bind: [user] do ... end`; the nested block is a scope of its own too, and binds what it needs from the enclosing one.
+Both children have a `validated` step, with no conflict. A child starts with an empty state, so it gets what it needs as arguments, like `user` above. You can also nest a block inline: `billing <- queue bind: [user] do ... end`.
 
-If a child step fails, the parent step fails and the reason is the child's error tuple, with the child's results up to the failure:
+If a child step fails, the parent step fails too. Its reason is the child's error tuple, with the child's state:
 
 ```elixir
 {:error, :billing, {:error, :invoice, :declined, %{user: ..., validated: ...}}, %{id: ..., user: ...}}
 ```
 
-To store a queue as a value instead of running it, use `=` or return `{:ok, queue}`.
+A failed child's state is only in that nested tuple, so that's where to find what it did before failing:
+
+```elixir
+{:error, :reservations, {:error, _step, reason, reserved}, _state} ->
+  for {_step, reservation} <- reserved, do: Inventory.release(reservation)
+  {:error, :reservations, reason}
+```
+
+If a later step fails instead, the child finished, and its state is under its name as usual.
+
+To store a queue without running it, use `=` or return `{:ok, queue}`.
 
 ## Debugging
 
-`debug()` prints the current queue's accumulated state when execution reaches it. Inline conditionals share their enclosing queue's state; named child queues see only their own state. Printing never changes the pipeline's results.
-
-Pass `only:` to print selected keys:
+`debug()` prints the state so far. It never changes it. `only:` picks steps; other options go to `IO.inspect/2`:
 
 ```elixir
 queue do
   a = 1
   b = 2
-  debug(only: :a)
+  debug(only: :a, label: "after b")
 end
 |> execute()
 
 # Prints:
-# %{a: 1}
+# after b: %{a: 1}
 ```
 
-Options can reference earlier steps and bound values, just like step expressions:
+Options can use earlier steps, and are evaluated when execution reaches `debug`. In a child queue, it prints only the child's state. See `Q.debug/2`.
 
-```elixir
-label = "approval"
+## Building queues from data
 
-queue bind: [label] do
-  selected = :user
-  user = %{id: 7}
+A `queue` block compiles to the functional API in `Q`, which you can use directly. Both build the same queue and run with `Q.execute/1`. The return values, errors, child queues and halts work the same, and you can mix the two.
 
-  if user.id == 7 do
-    approved = true
-    debug(only: [selected, :approved], label: label)
-  end
-end
-|> execute()
+The block gives you compile-time checks, inferred inputs and inline nesting. The functional API gives you what a block can't do.
 
-# Prints user and approved with the label "approval".
-```
-
-The options expression runs once each time execution reaches that statement, rather than while building the queue. It isn't evaluated in an untaken branch or after an earlier error or halt.
-
-`only:` accepts one valid step name or a list of names, including tuple names such as `{:invite, 7}`. An empty list prints `%{}`, and valid names missing from the current state are omitted. Invalid names, including `nil`, `true`, `false`, `:_`, strings and nested lists, raise `ArgumentError`. Options must be a keyword list. Q removes `only:` before passing other options to `IO.inspect/2`.
-
-In the functional API, `Q.debug(q, options)` takes ordinary options and validates them when added. DSL options are validated when execution evaluates them.
-
-## Rules
-
-* Every statement in a `queue` block is a step (`name = expr` or `name <- expr`), `debug()`, or a conditional containing steps. `execute()` isn't a statement: the block builds the queue, and `execute/1` runs it. Every step must have a name, including steps run for their side effects.
-* The left side of a step is a single named variable, and each name is bound once. Every successful step stores its result, including names starting with `_`. Bare `_` is not allowed.
-* Steps can't use variables from outside the block. Bring them in with `bind:`, which makes them the queue's first steps. Variables bound inside an expression, such as `fn` arguments, work as usual.
-* Mistakes, including a malformed `if`, `unless`, `case` or `cond`, are compile errors pointing at the line.
-
-## The DSL and the functional API
-
-A `queue` block compiles to the functional API in `Q`, which is also public. Both build the same queue, both run with `execute/1`, and a queue built one way can be a child step in the other. They differ in what they are for.
-
-### What the DSL gives you
-
-* Compile-time checks: a misspelled step reference or an unbound outside variable is an unknown variable, and a step bound twice or a malformed `if`/`case` is a compile error pointing at the line.
-* Inputs inferred from the expression, so a step reads like a normal call: `decoded <- Base.decode64(input)`.
-* Branching by writing `if`, `unless`, `case` or `cond` around the steps.
-* Inline nesting: `billing <- queue bind: [user] do ... end`.
-
-### What the functional API gives you
-
-A step per item, named after the item, so each item's result and failure are tracked separately:
+**A step per item**, named after the item, so you see which one failed:
 
 ```elixir
 users
@@ -311,12 +388,21 @@ end)
 # {:error, {:invite, 2}, :bounced, %{{:invite, 1} => :sent}}
 ```
 
-Names that aren't variables, such as `{:invite, id}` above or `{:check, :email}`. Step names must be atoms or tuples; `nil`, `true`, `false` and `:_` are not allowed, and lists, strings and other terms are rejected when the step is added.
+Step names must be unique, and a duplicate raises `ArgumentError` when it's added. If items can repeat, add their position to the name, like `{:invite, id, index}`.
 
-Steps chosen from data, for example a list of named checks, so the error names the check that failed:
+Each item's result is stored under its own name, so after a failure you can undo exactly the items that went through:
 
 ```elixir
-checks = [email: &valid_email?/1, age: &adult?/1, country: &supported_country?/1]
+{:error, step, reason, state} ->
+  for {{:reserve, _sku}, reservation} <- state, do: Inventory.release(reservation)
+  {:error, step, reason}
+```
+
+**Steps chosen from data**, so the error names the check that failed:
+
+```elixir
+# Each check returns {:ok, value} or {:error, reason}
+checks = [email: &check_email/1, age: &check_age/1, country: &check_country/1]
 
 checks
 |> Enum.reduce(Q.new() |> Q.put(:user, user), fn {name, check}, q ->
@@ -324,10 +410,10 @@ checks
 end)
 |> Q.execute()
 
-# {:error, :age, :underage, %{user: ..., email: true}}
+# {:error, :age, :underage, %{user: ..., email: "joe@example.com"}}
 ```
 
-Queues built across functions, and steps added on a condition known when the queue is built:
+**Queues built across functions**, or with steps added conditionally:
 
 ```elixir
 def parse(q), do: Q.run(q, :parsed, &CSV.parse/1, [:file])
@@ -338,88 +424,33 @@ q = if opts[:notify], do: Q.run(q, :notified, &Notifier.notify/1, [:validated]),
 Q.execute(q)
 ```
 
-Explicit control over inputs. A step's inputs are listed: `decoded <- Base.decode64(trimmed)` in a `queue` block is `Q.run(q, :decoded, &Base.decode64/1, [:trimmed])`, and `billing <- billing_steps(user)` is `Q.run(q, :billing, &billing_steps/1, [:user])`. For both `run` and `let`, omitted params and explicit `[]` have different meanings. These rules apply to functions, captures and MFAs:
+Step names are atoms or tuples, like `{:invite, id}`. `nil`, `true`, `false` and `:_` aren't allowed.
 
-| Params | Queue inputs |
+### Inputs and step functions
+
+`Q.put/3` stores a value. `Q.run/4` is `<-` and `Q.let/4` is `=`. Instead of being inferred, inputs are listed: `decoded <- Base.decode64(trimmed)` becomes `Q.run(q, :decoded, &Base.decode64/1, [:trimmed])`. Leaving params out and passing `[]` are different:
+
+| Params | Inputs |
 |---|---|
-| Omitted | The whole accumulated state as one argument |
-| `[]` | No queue inputs |
-| `[:input, :options]` | Those results, in the listed order |
+| Omitted | The whole state, as one map |
+| `[]` | None |
+| `[:input, :options]` | Those results, in that order |
 
-For example, a whole-state callback omits params, while an independent operation supplies `[]`:
+Omitted params and a one-name list both call a one-argument function, so a mix-up isn't caught when the step is added: with params omitted, the function gets the whole state instead of one result.
 
-```elixir
-Q.new()
-|> Q.put(:input, "aGVsbG8")
-|> Q.run(:snapshot, fn state -> {:ok, state} end)
-|> Q.run(:decoded, fn -> Base.decode64("aGVsbG8", padding: false) end, [])
-|> Q.execute()
-
-# {:ok, %{input: "aGVsbG8", snapshot: %{input: "aGVsbG8"}, decoded: "hello"}}
-```
-
-Q validates arity when a step is added. A zero-argument function requires explicit `[]`; it does not change the meaning of omitted params. In the DSL, Q generates the dependency list, so calls such as `token <- generate_token()` need no special syntax. See the [documentation](https://hexdocs.pm/ex_q/Q.html) for `put/3`, `run/4`, `let/4` and `debug/2`.
-
-### Passing options to step functions
-
-Fixed arguments, such as function options, can be passed alongside values from earlier steps. An MFA (`{module, function, args}`) lists the fixed arguments in `args`; a function capture can close over them:
-
-```elixir
-options = [padding: false]
-
-Q.new()
-|> Q.put(:encoded, "aGVsbG8")
-|> Q.run(:decoded_mfa, {Base, :decode64, [options]}, [:encoded])
-|> Q.run(:decoded_capture, &Base.decode64(&1, options), [:encoded])
-|> Q.execute()
-
-# {:ok, %{
-#   encoded: "aGVsbG8",
-#   decoded_mfa: "hello",
-#   decoded_capture: "hello"
-# }}
-```
-
-Both steps call `Base.decode64(encoded, options)`. For the MFA, dependency values precede the fixed arguments by default. The capture places them explicitly in the call.
-
-Explicit `[]` passes only an MFA's fixed arguments, for example `Q.run(q, :decoded, {Base, :decode64, ["aGVsbG8", options]}, [])`. `{[], order: :append}` also passes no queue inputs. Omitting params instead passes the whole state before any fixed arguments.
-
-If the options come from an earlier step, list them as another dependency and use a direct function reference:
+A step function can be a function, a capture or an MFA (`{module, function, args}`). An MFA's `args` are fixed arguments, like options. Inputs go before them, or after with `{[:key], order: :append}`:
 
 ```elixir
 Q.new()
 |> Q.put(:encoded, "aGVsbG8")
-|> Q.put(:options, padding: false)
-|> Q.run(:decoded, &Base.decode64/2, [:encoded, :options])
+|> Q.run(:decoded, {Base, :decode64, [[padding: false]]}, [:encoded])
 |> Q.execute()
 
-# {:ok, %{
-#   encoded: "aGVsbG8",
-#   options: [padding: false],
-#   decoded: "hello"
-# }}
+# {:ok, %{encoded: "aGVsbG8", decoded: "hello"}}
 ```
 
-### What they share
-
-The queue, `execute/1`, the result and error shapes, child queues, halts, how a step's return value is handled, and the rules for exceptions and side effects are the same in both. Mixing them is fine: a queue built with the functional API can be a child step in a `queue` block, and the other way round.
+See `Q.run/4`, `Q.let/4`, `Q.put/3` and `Q.debug/2` for details.
 
 ### When mistakes are caught
 
-The DSL checks when your code compiles. The functional API checks when the step is added: a wrong arity, an unknown param, an invalid name or a duplicate name raise `ArgumentError` before anything runs, but only once that code runs. That is the price of building from data. When a pipeline is written out in code, use the DSL.
-
-## Installation
-
-Add `ex_q` to your list of dependencies in `mix.exs`:
-
-```elixir
-def deps do
-  [
-    {:ex_q, "~> 2.0"}
-  ]
-end
-```
-
-Upgrading from 1.x? See the [changelog](CHANGELOG.md).
-
-Documentation can be found at [https://hexdocs.pm/ex_q](https://hexdocs.pm/ex_q).
+The block is checked at compile time. A typo in a step name, an unbound outside variable or a duplicate step is a compile error. The functional API checks each step as it's added: a wrong arity, an unknown param, a bad name or a duplicate raises `ArgumentError`, but only when that code runs. That's the cost of building from data. If you can write the pipeline out in code, use the block.

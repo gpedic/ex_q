@@ -55,5 +55,22 @@ jobs:
       if: ${{ matrix.lint }}
       run: mix credo --strict
 
+    - name: Cache Dialyzer PLTs
+      if: ${{ matrix.lint }}
+      uses: actions/cache@v4
+      with:
+        path: priv/plts
+        key: ${{ runner.os }}-plt-${{ matrix.otp }}-${{ matrix.elixir }}-${{ hashFiles('mix.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-plt-${{ matrix.otp }}-${{ matrix.elixir }}-
+
+    - name: Build Dialyzer PLTs
+      if: ${{ matrix.lint }}
+      run: mix dialyzer --plt
+
+    - name: Run Dialyzer
+      if: ${{ matrix.lint }}
+      run: mix dialyzer --format github
+
     - name: Run Tests
       run: mix coveralls.github
