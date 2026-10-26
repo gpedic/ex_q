@@ -47,16 +47,11 @@ defmodule QTest do
       assert {:ok, %{}} = Q.new() |> Q.execute()
     end
 
-    test "raises for unexpected returns" do
-      q =
-        Q.new()
-        |> Q.run(:bad_return, fn _ -> {:bad, 1} end)
-
-      assert_raise RuntimeError,
-                   ~r/^expected step :bad_return to return {:ok, value}, {:error, reason}, :error, {:halt, value}, {:halt, value, propagate: boolean} or a queue, got: {:bad, 1}$/,
-                   fn ->
-                     Q.execute(q)
-                   end
+    test "a run step stores a return value that isn't a result as is" do
+      for value <- [{:bad, 1}, nil, 42, "text", {:ok, 1, 2}, [ok: 1]] do
+        assert Q.new() |> Q.run(:plain, fn -> value end, []) |> Q.execute() ==
+                 {:ok, %{plain: value}}
+      end
     end
 
     test "callback exceptions propagate unchanged and leave completed effects in place" do
@@ -837,9 +832,9 @@ defmodule QTest do
                {:ok, %{stop: :early}}
     end
 
-    test "other third elements of a halt are invalid returns" do
+    test "a malformed halt raises rather than being stored" do
       for bad <- [{:halt, 1, :bogus}, {:halt, 1, other: true}, {:halt, 1, propagate: :yes}] do
-        assert_raise RuntimeError, ~r/expected step :step to return/, fn ->
+        assert_raise RuntimeError, ~r/expected step :step to halt with/, fn ->
           Q.new() |> Q.run(:step, fn -> bad end, []) |> Q.execute()
         end
       end
@@ -1022,24 +1017,6 @@ defmodule QTest do
       assert_raise ArgumentError, ~r":run is already a step in this queue", fn ->
         Q.new() |> Q.run(:run, fun) |> Q.run(:run, fun)
       end
-    end
-
-    test "returning invalid return value will raise and error" do
-      assert_raise RuntimeError,
-                   ~r/^expected step :bad_return to return {:ok, value}, {:error, reason}, :error, {:halt, value}, {:halt, value, propagate: boolean} or a queue, got: {:invalid, 1}$/,
-                   fn ->
-                     Q.new()
-                     |> Q.run(:bad_return, fn _ -> {:invalid, 1} end)
-                     |> Q.execute()
-                   end
-
-      assert_raise RuntimeError,
-                   ~r"expected step :empty to return {:ok, value}, {:error, reason}, :error, {:halt, value}, {:halt, value, propagate: boolean} or a queue, got: nil",
-                   fn ->
-                     Q.new()
-                     |> Q.run(:empty, fn _ -> nil end)
-                     |> Q.execute()
-                   end
     end
 
     test "passing an operation that is not a function or mfa tuple raises" do

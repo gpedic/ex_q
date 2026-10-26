@@ -70,7 +70,7 @@ end
 }}
 ```
 
-Steps can return `{:error, reason}` or a bare `:error`, so functions like `Base.decode64/1` or `Map.fetch/2` work as steps without wrapping. A bare `:error` is reported as `{:error, step, :error, state}`.
+Steps can return `{:error, reason}` or a bare `:error`, so functions like `Base.decode64/1` or `Map.fetch/2` work as steps without wrapping. A bare `:error` is reported as `{:error, step, :error, state}`. Functions that return a plain value work with `<-` too; the value is stored as is.
 
 ### Exceptions and side effects
 
@@ -113,12 +113,14 @@ Every step is a binding, and the variable names the step:
 ```elixir
 # Outside values come in through bind:, as the queue's first steps
 queue bind: [input] do
-  # = stores the value of an expression: a value, or a function that can't fail
-  trimmed = String.trim(input)
-
-  # <- runs a function that returns {:ok, value}, {:error, reason} or :error,
-  # and stores the value
+  # <- is a step whose result decides what happens next: {:ok, value} is
+  # unwrapped, {:error, reason} or :error stops the pipeline, {:halt, value}
+  # ends it, and any other value is stored as is
+  trimmed <- String.trim(input)
   decoded <- Base.decode64(trimmed)
+
+  # = is a step that can't fail: the value is stored as is, never unwrapped
+  limit = 100
 
   # Side-effect steps are named and their successful results are stored too
   notified <- Notifier.notify(decoded)
@@ -126,6 +128,8 @@ end
 ```
 
 A step's inputs are the earlier steps its expression uses: `decoded <- Base.decode64(trimmed)` depends on `trimmed`. Steps run in order when the queue is executed, and each result is stored under the step's name.
+
+Use `=` for values and for calls whose result you want exactly as it is, including one shaped like a result, such as `{:ok, pid}`. Use `<-` when the result decides what happens next. Reading a block, `<-` marks the steps that can fail; only an exception can stop a `=` step.
 
 A block is a scope of its own, like `quote`: a step can't use variables from outside the block, so a misspelled step name is a compile error even when a variable of that name exists. Bring outside values in with `bind:`. A bare variable is bound under its own name, and `name: expr` binds any expression:
 
