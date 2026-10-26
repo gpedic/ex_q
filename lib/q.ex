@@ -34,14 +34,13 @@ defmodule Q do
     * `{:ok, value}` - stores `value` under the step's name and continues
     * `{:error, reason}` - stops; `execute/1` returns `{:error, name, reason, state}`
     * `:error` - same as `{:error, :error}`, for functions such as `Base.decode64/1`
-    * `{:halt, value}` - stores `value` and stops the pipeline; `execute/1` returns `{:ok, state}`
-    * `{:halt, value, propagate: false}` - like `{:halt, value}`, but when the queue runs as
-      a child (see below) only the child stops
+    * `{:halt, value}` - stores `value` and stops the queue it's written in; `execute/1`
+      returns `{:ok, state}`
     * a queue - runs it as a child, see below
     * any other value - stores it under the step's name as is
 
-  So `<-` works for functions that return plain values too. A malformed halt, or the result
-  of executing a queue instead of the queue itself, raises.
+  So `<-` works for functions that return plain values too. Returning the result of
+  executing a queue instead of the queue itself raises.
 
   A step written with `=` can't fail or halt: whatever its expression returns is stored as
   is, without unwrapping, so `{:ok, 1}` is stored as `{:ok, 1}`. Only an exception stops it.
@@ -71,10 +70,11 @@ defmodule Q do
       end
 
   If a child step fails, the parent step fails with the child's error tuple as the reason:
-  `{:error, :billing, {:error, :charge, :declined, %{...}}, %{id: ..., user: ...}}`. A halt in a
-  child stops the parent too, unless it is `{:halt, value, propagate: false}`; then the
-  parent stores the child's partial results and continues. To store a queue as a value
-  instead of running it, use `=` or return `{:ok, queue}`.
+  `{:error, :billing, {:error, :charge, :declined, %{...}}, %{id: ..., user: ...}}`. A halt
+  stops the queue it's written in, as `{:halt, acc}` stops the `Enum.reduce_while/3` it's
+  in: a halt in a child ends the child, and the parent stores the child's results so far,
+  continues, and can halt in turn based on them. To store a queue as a value instead of
+  running it, use `=` or return `{:ok, queue}`.
 
   ## The functional API
 
@@ -122,7 +122,6 @@ defmodule Q do
           | {:error, any}
           | :error
           | {:halt, any}
-          | {:halt, any, [propagate: boolean]}
           | t
   @type step_fun :: (... -> result)
   @type fun_mfa :: {module, atom, [any]} | {module, atom}
@@ -271,7 +270,7 @@ defmodule Q do
   @spec execute(t) :: {:ok, state} | error
   def execute(%Q{operations: operations}) do
     case run_ops(Enum.reverse(operations), %{}) do
-      {:halted, state, _propagate} -> {:ok, state}
+      {:halted, state} -> {:ok, state}
       result -> result
     end
   end
@@ -615,10 +614,7 @@ defmodule Q do
         {:cont, {:ok, store!(state, name, value)}}
 
       {:halt, value} ->
-        {:halt, {:halted, store!(state, name, value), true}}
-
-      {:halt, value, opts} = halt ->
-        {:halt, {:halted, store!(state, name, value), propagate!(name, opts, halt)}}
+        {:halt, {:halted, store!(state, name, value)}}
 
       {:error, reason} ->
         {:halt, {:error, name, reason, state}}
@@ -640,25 +636,15 @@ defmodule Q do
     end
   end
 
-  defp propagate!(_name, [propagate: propagate], _halt) when is_boolean(propagate),
-    do: propagate
-
-  defp propagate!(name, _opts, halt) do
-    raise "expected step #{Kernel.inspect(name)} to halt with {:halt, value} or " <>
-            "{:halt, value, propagate: boolean}, got: #{Kernel.inspect(halt)}"
-  end
-
   # A child queue runs with its own state and its result map is stored under the
-  # step's name. Its halt stops the parent too, unless the halt doesn't propagate.
+  # step's name. A halt stops the queue it's written in, so a halted child ends
+  # with the results it has so far and the parent continues.
   defp run_child(name, operations, state) do
     case run_ops(Enum.reverse(operations), %{}) do
       {:ok, child} ->
         {:cont, {:ok, store!(state, name, child)}}
 
-      {:halted, child, true} ->
-        {:halt, {:halted, store!(state, name, child), true}}
-
-      {:halted, child, false} ->
+      {:halted, child} ->
         {:cont, {:ok, store!(state, name, child)}}
 
       {:error, child_name, reason, child} ->
