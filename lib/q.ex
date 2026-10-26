@@ -149,6 +149,9 @@ defmodule Q do
   """
   @doc group: "Functional API"
   @spec new :: t
+  # MapSet.new() is compiled into a literal %MapSet{}, which OTP 28's Dialyzer reports as
+  # building MapSet's opaque internals in this module. The value is a normal MapSet.
+  @dialyzer {:no_contracts, new: 0}
   def new do
     %Q{names: MapSet.new()}
   end
