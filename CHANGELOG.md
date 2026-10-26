@@ -35,8 +35,9 @@ Also new in the block:
 - A step whose function returns a queue runs it as a child queue, with its results stored as a map under the step's name; `name <- queue do ... end` nests a block inline.
 - A halt stops the queue it's written in, like `{:halt, acc}` in `Enum.reduce_while/3`: in a child queue it ends the child, and the parent continues with the child's results so far, deciding from them whether to halt in turn.
 - Conditionals go inside a step and choose its value: `approval <- if total > 100, do: request(order), else: {:ok, nil}`. An `if`, `unless`, `case` or `cond` as a statement of its own is a compile error.
-- Mistakes, such as binding a name twice, are compile errors pointing at the line.
+- Mistakes, such as binding a name twice, are compile errors pointing at the line. Likely mistakes get a message showing the right form: `{:ok, user} <- fetch(id)` points at `user <- fetch(id)`, and calls like `run(...)` or `Q.run(...)` inside a block point at bindings and at the functional API for a step per item.
 - The docs compare the `queue` block and the functional API: what each is for, and when mistakes are caught.
+- The package ships a recipes guide (`guides/recipes.md`) with complete patterns, including failure and cleanup paths, and `usage-rules.md`, a short list of rules and common mistakes for coding agents.
 
 ### Functional API
 

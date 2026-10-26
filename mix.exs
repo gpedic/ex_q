@@ -61,7 +61,7 @@ defmodule Q.MixProject do
   defp package do
     [
       name: :ex_q,
-      files: ["lib", "mix.exs", "README*", "CHANGELOG*", "LICENSE*"],
+      files: ["lib", "guides", "mix.exs", "README*", "CHANGELOG*", "LICENSE*", "usage-rules.md"],
       maintainers: ["Goran Pedić"],
       licenses: ["MIT"],
       links: %{"GitHub" => @url}
@@ -76,6 +76,8 @@ defmodule Q.MixProject do
       skip_undefined_reference_warnings_on: ["CHANGELOG.md"],
       extras: [
         "README.md": [title: "Overview"],
+        "guides/recipes.md": [title: "Recipes"],
+        "usage-rules.md": [title: "Rules for coding agents"],
         "CHANGELOG.md": [title: "Changelog"],
         LICENSE: [title: "License"]
       ],
