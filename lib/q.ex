@@ -1,7 +1,7 @@
 defmodule Q do
   @moduledoc """
-  Pipelines of named steps, like a `with` that remembers: every step's result is kept, and
-  a failure tells you which step it was.
+  Pipelines of named steps for Elixir, written like a `with` chain. Intermediate results are
+  kept, and failures report the failing step together with the state accumulated so far.
 
   Each step's result is stored under the step's name, in a map called the state. When a step
   fails, `execute/1` returns the step's name, its error and the state built so far.

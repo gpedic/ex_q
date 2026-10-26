@@ -36,8 +36,8 @@ defmodule Q.MixProject do
 
   defp description do
     """
-    Pipelines of named steps for Elixir, like a with that remembers: you get the result
-    of every step, and when one fails, its name, its error and everything before it.
+    Pipelines of named steps for Elixir, written like a with chain. Intermediate results
+    are kept, and failures report the failing step together with the state accumulated so far.
     """
   end
 
