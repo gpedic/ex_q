@@ -20,9 +20,8 @@ defmodule Q do
 
   A block is a scope of its own, like `quote`: a step's expression can use earlier steps,
   which become its inputs, but not variables from outside the block. Outside values come in
-  through `bind:`, which makes them the queue's first steps. `if`, `unless`, `case` and
-  `cond` around steps choose which steps run from earlier results. The block only builds
-  the queue; `execute/1` runs it. See `queue/2` for all the rules.
+  through `bind:`, which makes them the queue's first steps. The block only builds the
+  queue; `execute/1` runs it. See `queue/2` for all the rules.
 
   The block is checked when your code compiles. For pipelines built from data there is a
   functional API, checked when each step is added; see "The functional API" below.
@@ -89,8 +88,8 @@ defmodule Q do
   child queues and halts. A queue built either way can be a child step of the other.
 
   The DSL gives compile-time checks (a misspelled step reference, an outside variable that
-  wasn't bound, a step bound twice, a malformed conditional), inputs inferred from the
-  expression, branching with `if` and `case`, and inline nesting.
+  wasn't bound, a step bound twice), inputs inferred from the expression, and inline
+  nesting.
 
   The functional API gives what a block can't: a step per item, named after the item
   (`Q.run(q, {:invite, id}, fn -> invite(id) end, [])` inside `Enum.reduce/3`); names that
@@ -126,14 +125,13 @@ defmodule Q do
   @type step_fun :: (... -> result)
   @type fun_mfa :: {module, atom, [any]} | {module, atom}
   @type params :: [name] | {[name], [order: :prepend | :append]}
-  @typep kind :: :put | :run | :let | :branch | :debug
+  @typep kind :: :put | :run | :let | :debug
   @type error :: {:error, name, any, state}
   @typep input :: :none | :state | {:keys, [name]}
   @typep call :: {:fun, function, input} | {:mfa, module, atom, [any], input, :prepend | :append}
   @typep operation ::
            {:step, name, :put, any}
            | {:step, name, :run | :let, call}
-           | {:branch, call}
            | {:debug, Keyword.t()}
            | {:debug, {:deferred, call}}
 
@@ -179,8 +177,8 @@ defmodule Q do
   end
 
   # Lists the queue's operations in order as `{kind, name}` tuples, with `name` nil for
-  # branches and debug calls. Internal: used by the tests to check what a queue block
-  # compiles to. Users get step names from operations/1.
+  # debug calls. Internal: used by the tests to check what a queue block compiles to.
+  # Users get step names from operations/1.
   @doc false
   @spec __to_list__(t) :: [{kind, name | nil}]
   def __to_list__(%Q{operations: operations}) do
@@ -188,7 +186,6 @@ defmodule Q do
     |> Enum.reverse()
     |> Enum.map(fn
       {:step, name, kind, _} -> {kind, name}
-      {:branch, _call} -> {:branch, nil}
       {:debug, _opts} -> {:debug, nil}
     end)
   end
@@ -196,9 +193,8 @@ defmodule Q do
   @doc """
   Returns the names of the queue's steps, in the order they were added.
 
-  Debug calls and conditionals aren't steps, so they aren't listed. Neither are the steps
-  inside a conditional or a child queue: which ones run is only decided when the queue runs.
-  A child queue appears as the step that runs it.
+  Debug calls aren't steps, so they aren't listed. Neither are the steps inside a child
+  queue: a child queue appears as the step that runs it.
 
   ## Example
       iex> Q.new()
@@ -216,8 +212,8 @@ defmodule Q do
   @doc """
   Adds an operation to the queue that, when executed, prints the current state of the queue.
 
-  Inline conditionals share their enclosing queue's accumulated state. Named child queues
-  have their own state. Printing or filtering never changes the pipeline's results.
+  A child queue prints its own state. Printing or filtering never changes the pipeline's
+  results.
 
   The printing is performed using Elixir's `IO.inspect/2`. The Q-specific `:only` option
   selects one valid step name or a list of names; `only: []` prints an empty map. Valid
@@ -225,8 +221,7 @@ defmodule Q do
   to `IO.inspect/2` after removing `:only`.
 
   In a `queue/1` block, options are evaluated once whenever execution reaches the debug
-  statement, can reference earlier steps, and aren't evaluated in skipped branches or
-  after an error or halt. Functional options are validated when added with `debug/2`;
+  statement, can reference earlier steps, and aren't evaluated after an error or halt. Functional options are validated when added with `debug/2`;
   DSL options are validated when evaluated. Invalid options or selections raise
   `ArgumentError`.
 
@@ -371,14 +366,6 @@ defmodule Q do
     add_op(queue, {:step, name, :let, build_call!(queue, fun, params)})
   end
 
-  # Runs the steps of a conditional in a queue/1 block: the branch taken builds a
-  # queue, whose results are added to the state as if its steps were written
-  # inline. Only the DSL calls this.
-  @doc false
-  def __branch__(%Q{} = queue, fun, params) do
-    add_op(queue, {:branch, build_call!(queue, fun, params)})
-  end
-
   @doc """
   Builds a queue from a block of steps.
 
@@ -390,7 +377,6 @@ defmodule Q do
       unwrapped, `{:error, reason}` or `:error` stops the pipeline, `{:halt, value}` ends
       it; any other value is stored as is (compiles to `run/4`)
     * `debug()` or `debug(opts)` - prints the state, see `debug/2`
-    * `if`, `unless`, `case` or `cond` containing steps - the branch taken adds its steps
 
   Rules:
 
@@ -400,7 +386,9 @@ defmodule Q do
       work as usual.
     * The left side is a single named variable, and a name is bound once. Every successful
       result is stored, including names starting with `_`. Bare `_` is not allowed.
-    * A step bound inside a branch is in the result, but can't be used after the conditional.
+    * A conditional goes inside a step and chooses its value:
+      `name <- if cond, do: ..., else: ...`. A branch can return a queue to run several
+      steps as a child.
     * A `<-` step whose expression returns a queue runs it as a child, and stores the child's
       results as a map under the step's name. `name <- queue bind: [...] do ... end` nests a
       block inline; the nested block binds what it needs, like any other.
@@ -422,7 +410,7 @@ defmodule Q do
       iex> data = "aGVsbG8="
       iex> queue bind: [data] do
       ...>   decoded <- Base.decode64(data)
-      ...>   if decoded == "hello", do: greeting = true
+      ...>   greeting = decoded == "hello"
       ...> end
       ...> |> execute()
       {:ok, %{data: "aGVsbG8=", decoded: "hello", greeting: true}}
@@ -591,30 +579,20 @@ defmodule Q do
   defp run_op({:debug, opts}, {:ok, state}), do: print_debug(state, opts)
 
   defp run_op({:step, name, :put, value}, {:ok, state}) do
-    {:cont, {:ok, store!(state, name, value)}}
+    {:cont, {:ok, Map.put(state, name, value)}}
   end
 
   defp run_op({:step, name, :let, call}, {:ok, state}) do
-    {:cont, {:ok, store!(state, name, call(call, state))}}
-  end
-
-  # A branch shares its enclosing queue's state, including earlier results.
-  defp run_op({:branch, call}, {:ok, state}) do
-    %Q{operations: operations} = call(call, state)
-
-    case run_ops(Enum.reverse(operations), state) do
-      {:ok, _state} = result -> {:cont, result}
-      result -> {:halt, result}
-    end
+    {:cont, {:ok, Map.put(state, name, call(call, state))}}
   end
 
   defp run_op({:step, name, :run, call}, {:ok, state}) do
     case call(call, state) do
       {:ok, value} ->
-        {:cont, {:ok, store!(state, name, value)}}
+        {:cont, {:ok, Map.put(state, name, value)}}
 
       {:halt, value} ->
-        {:halt, {:halted, store!(state, name, value)}}
+        {:halt, {:halted, Map.put(state, name, value)}}
 
       {:error, reason} ->
         {:halt, {:error, name, reason, state}}
@@ -632,7 +610,7 @@ defmodule Q do
 
       # Anything else is a plain value, stored as is
       value ->
-        {:cont, {:ok, store!(state, name, value)}}
+        {:cont, {:ok, Map.put(state, name, value)}}
     end
   end
 
@@ -642,10 +620,10 @@ defmodule Q do
   defp run_child(name, operations, state) do
     case run_ops(Enum.reverse(operations), %{}) do
       {:ok, child} ->
-        {:cont, {:ok, store!(state, name, child)}}
+        {:cont, {:ok, Map.put(state, name, child)}}
 
       {:halted, child} ->
-        {:cont, {:ok, store!(state, name, child)}}
+        {:cont, {:ok, Map.put(state, name, child)}}
 
       {:error, child_name, reason, child} ->
         {:halt, {:error, name, {:error, child_name, reason, child}, state}}
@@ -664,17 +642,6 @@ defmodule Q do
   defp input_args(:state, state), do: [state]
 
   defp input_args({:keys, keys}, state), do: Enum.map(keys, &Map.fetch!(state, &1))
-
-  # Names are unique within a queue and the compiler rejects duplicates across
-  # branches, so a clash here means a branch function was built by hand.
-  defp store!(state, name, value) do
-    if Map.has_key?(state, name) do
-      raise ArgumentError,
-            "step #{Kernel.inspect(name)} conflicts with a step of the same name from a branch"
-    end
-
-    Map.put(state, name, value)
-  end
 
   defp print_debug(state, opts) do
     selected =
