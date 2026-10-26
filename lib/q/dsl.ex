@@ -22,7 +22,7 @@ defmodule Q.DSL do
   @bindings "in a queue block, steps are bindings named by their variable: " <>
               "`name = expr` for values and functions that can't fail, `name <- expr` for " <>
               "functions that return {:ok, value} or {:error, reason}, and debug() to print " <>
-              "the results. For a step per item or a computed name, build the queue with " <>
+              "the state. For a step per item or a computed name, build the queue with " <>
               "Q.new/0 and Q.run/4 instead of a block"
 
   def compile(opts, block, caller) do
@@ -161,7 +161,7 @@ defmodule Q.DSL do
       env,
       meta,
       "merge(queue) is not a statement; run a queue as a step with `name <- queue`, " <>
-        "its results are stored under `name`"
+        "its state is stored under `name`"
     )
   end
 

@@ -59,10 +59,10 @@ def handle_webhook(conn, body, signature) do
       Logger.info("webhook #{event["id"]} applied, notification #{notified.id} sent")
       send_resp(conn, 200, "")
 
-    {:error, :payload, _reason, _results} ->
+    {:error, :payload, _reason, _state} ->
       send_resp(conn, 401, "")
 
-    {:error, :event, _reason, _results} ->
+    {:error, :event, _reason, _state} ->
       send_resp(conn, 400, "")
 
     {:error, step, reason, %{event: event}} ->
@@ -85,7 +85,7 @@ When a step fails, you get this:
 }}
 ```
 
-The tuple holds the step's name, the reason from its `{:error, reason}`, and every result before it. The failing step has no result, so it isn't in the map.
+The tuple holds the step's name, the reason from its `{:error, reason}`, and the state: the result of every step before it, each under its step's name. The failing step has no result, so it isn't in the state.
 
 You match on the step, not the shape of the error. The earlier results are right there, for logging, error messages or cleanup. On success you get all of them too, as a map you can log, return or pass on.
 
@@ -188,9 +188,9 @@ The block builds the queue but doesn't run it. Pipe it into `Q.execute/1`. That 
 
 A `<-` step fails when it returns `{:error, reason}` or `:error`. So functions like `Base.decode64/1` and `Map.fetch/2` work as steps without wrapping. The error tuple holds `reason` itself, not `{:error, reason}`; a bare `:error` gives `:error` as the reason. Functions that return a plain value work too; the value is stored as is.
 
-The results hold whatever your steps returned, including tokens and personal data. Pick what you log.
+The state holds whatever your steps returned, including tokens and personal data. Pick what you log.
 
-Exceptions aren't caught. They reach the caller unchanged, from child queues too, without the results attached.
+Exceptions aren't caught. They reach the caller unchanged, from child queues too, without the state attached.
 
 Q doesn't roll back. If a step fails, the steps before it have already happened:
 
@@ -223,7 +223,7 @@ end
 |> execute()
 ```
 
-The step always runs, so it's always in the results and later steps can use it. If the branch that runs returns an error or a halt, the queue stops as usual.
+The step always runs, so it's always in the state and later steps can use it. If the branch that runs returns an error or a halt, the queue stops as usual.
 
 Without an `else`, a false condition gives `nil`, which `<-` stores like any other value: `approval <- if total > 100, do: Approvals.request(order)` stores `nil` for small orders.
 
@@ -269,7 +269,7 @@ end
 {:ok, %{request: %{key: "BWBeN28Vb7cMEx7Ym8AUzs", ...}, cached: :not_found, processed: %{...}, stored: ...}}
 ```
 
-The halting step's value is stored under its name, and the steps after it aren't in the results. `Q.execute/1` returns `{:ok, results}` either way, so to tell a halt from a full run, match on a key only one of them has:
+The halting step's value is stored under its name, and the steps after it aren't in the state. `Q.execute/1` returns `{:ok, state}` either way, so to tell a halt from a full run, match on a key only one of them has:
 
 ```elixir
 case process_data(input) do
@@ -278,11 +278,11 @@ case process_data(input) do
 end
 ```
 
-A halt stops the queue it's in, the way `{:halt, acc}` stops `Enum.reduce_while/3`. In a [child queue](#child-queues), it stops only the child. The parent keeps the child's results and carries on.
+A halt stops the queue it's in, the way `{:halt, acc}` stops `Enum.reduce_while/3`. In a [child queue](#child-queues), it stops only the child. The parent stores the child's state and carries on.
 
 ## Child queues
 
-A step that returns a queue runs it as a child. The child's results are stored as a map under the step's name. Its step names don't clash with the parent's, so a function that builds a queue can be reused anywhere:
+A step that returns a queue runs it as a child. The child's state is stored under the step's name. Its step names don't clash with the parent's, so a function that builds a queue can be reused anywhere:
 
 ```elixir
 def billing_steps(user) do
@@ -316,29 +316,29 @@ end
 # }}
 ```
 
-Both children have a `validated` step, with no conflict. A child starts with no results, so it binds what it needs, like `user` above. You can also nest a block inline: `billing <- queue bind: [user] do ... end`.
+Both children have a `validated` step, with no conflict. A child starts with an empty state, so it binds what it needs, like `user` above. You can also nest a block inline: `billing <- queue bind: [user] do ... end`.
 
-If a child step fails, the parent step fails too. Its reason is the child's error tuple, with the child's results:
+If a child step fails, the parent step fails too. Its reason is the child's error tuple, with the child's state:
 
 ```elixir
 {:error, :billing, {:error, :invoice, :declined, %{user: ..., validated: ...}}, %{id: ..., user: ...}}
 ```
 
-A failed child's results are only in that nested tuple, so that's where to find what it did before failing:
+A failed child's state is only in that nested tuple, so that's where to find what it did before failing:
 
 ```elixir
-{:error, :reservations, {:error, _step, reason, reserved}, _results} ->
+{:error, :reservations, {:error, _step, reason, reserved}, _state} ->
   for {_step, reservation} <- reserved, do: Inventory.release(reservation)
   {:error, :reservations, reason}
 ```
 
-If a later step fails instead, the child finished, and its results are under its name as usual.
+If a later step fails instead, the child finished, and its state is under its name as usual.
 
 To store a queue without running it, use `=` or return `{:ok, queue}`.
 
 ## Debugging
 
-`debug()` prints the results so far. It never changes them. `only:` picks steps; other options go to `IO.inspect/2`:
+`debug()` prints the state so far. It never changes it. `only:` picks steps; other options go to `IO.inspect/2`:
 
 ```elixir
 queue do
@@ -352,11 +352,11 @@ end
 # after b: %{a: 1}
 ```
 
-Options can use earlier steps, and are evaluated when execution reaches `debug`. In a child queue, it prints only the child's results. See `Q.debug/2`.
+Options can use earlier steps, and are evaluated when execution reaches `debug`. In a child queue, it prints only the child's state. See `Q.debug/2`.
 
 ## Building queues from data
 
-A `queue` block compiles to the functional API in `Q`, which you can use directly. Both build the same queue and run with `Q.execute/1`. Results, errors, child queues and halts work the same, and you can mix the two.
+A `queue` block compiles to the functional API in `Q`, which you can use directly. Both build the same queue and run with `Q.execute/1`. The return values, errors, child queues and halts work the same, and you can mix the two.
 
 The block gives you compile-time checks, inferred inputs and inline nesting. The functional API gives you what a block can't do.
 
@@ -378,8 +378,8 @@ Step names must be unique, and a duplicate raises `ArgumentError` when it's adde
 Each item's result is stored under its own name, so after a failure you can undo exactly the items that went through:
 
 ```elixir
-{:error, step, reason, results} ->
-  for {{:reserve, _sku}, reservation} <- results, do: Inventory.release(reservation)
+{:error, step, reason, state} ->
+  for {{:reserve, _sku}, reservation} <- state, do: Inventory.release(reservation)
   {:error, step, reason}
 ```
 
@@ -417,11 +417,11 @@ Step names are atoms or tuples, like `{:invite, id}`. `nil`, `true`, `false` and
 
 | Params | Inputs |
 |---|---|
-| Omitted | All results so far, as one map |
+| Omitted | The whole state, as one map |
 | `[]` | None |
 | `[:input, :options]` | Those results, in that order |
 
-Omitted params and a one-name list both call a one-argument function, so a mix-up isn't caught when the step is added: with params omitted, the function gets the whole results map instead of one result.
+Omitted params and a one-name list both call a one-argument function, so a mix-up isn't caught when the step is added: with params omitted, the function gets the whole state instead of one result.
 
 A step function can be a function, a capture or an MFA (`{module, function, args}`). An MFA's `args` are fixed arguments, like options. Inputs go before them, or after with `{[:key], order: :append}`:
 

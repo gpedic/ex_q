@@ -29,11 +29,11 @@ The 1.x syntax is removed, and its calls inside a `queue` block are a compile er
 Also new in the block:
 
 - The block only builds the queue; pipe it into `execute/1` to run it. `execute()` and `exec()` inside the block are compile errors, so a function that returns a queue can't run it by accident before its caller runs it as a child queue.
-- A block is a scope of its own, like `quote`: steps can't use variables from outside it, so a misspelled step reference is a compile error even when a variable of that name exists. Outside values come in with `queue bind: [order, limit: opts[:limit]] do`; a bare variable binds under its own name, `name: expr` binds any expression, and each becomes one of the queue's first steps, in the results and in error tuples. A nested block binds what it needs from the enclosing one.
+- A block is a scope of its own, like `quote`: steps can't use variables from outside it, so a misspelled step reference is a compile error even when a variable of that name exists. Outside values come in with `queue bind: [order, limit: opts[:limit]] do`; a bare variable binds under its own name, `name: expr` binds any expression, and each becomes one of the queue's first steps, in the state and in error tuples. A nested block binds what it needs from the enclosing one.
 - `name <- expr` is a step whose result decides what happens next: `{:ok, value}` is unwrapped, `{:error, reason}` or `:error` stops the pipeline, `{:halt, value}` ends it, a queue runs as a child, and any other value is stored as is, so `<-` works for functions that return plain values. `name = expr` is a step that can't fail: the value is stored as is, never unwrapped. Reading a block, `<-` marks the steps that can fail. The same rule applies to `run/4` and `let/4`.
 - Every step must have a unique name and stores its successful result, including names starting with `_`. Bare `_` bindings are rejected at compile time.
-- A step whose function returns a queue runs it as a child queue, with its results stored as a map under the step's name; `name <- queue do ... end` nests a block inline.
-- A halt stops the queue it's written in, like `{:halt, acc}` in `Enum.reduce_while/3`: in a child queue it ends the child, and the parent continues with the child's results so far, deciding from them whether to halt in turn.
+- A step whose function returns a queue runs it as a child queue, with its state stored under the step's name; `name <- queue do ... end` nests a block inline.
+- A halt stops the queue it's written in, like `{:halt, acc}` in `Enum.reduce_while/3`: in a child queue it ends the child, and the parent continues with the child's state so far, deciding from it whether to halt in turn.
 - Conditionals go inside a step and choose its value: `approval <- if total > 100, do: request(order), else: {:ok, nil}`. An `if`, `unless`, `case` or `cond` as a statement of its own is a compile error.
 - Mistakes, such as binding a name twice, are compile errors pointing at the line. Likely mistakes get a message showing the right form: `{:ok, user} <- fetch(id)` points at `user <- fetch(id)`, and calls like `run(...)` or `Q.run(...)` inside a block point at bindings and at the functional API for a step per item.
 - The docs compare the `queue` block and the functional API: what each is for, and when mistakes are caught.
@@ -44,14 +44,14 @@ Also new in the block:
 New:
 
 - **`let/4`**: a step for functions that can't fail. The return value is stored as is, so `let(:upper, &String.upcase/1, [:text])` needs no `{:ok, _}` wrapping.
-- **Child queues**: a `run/4` function may return a queue, which runs as a child with its result map stored under the step's name. A failing child step is reported as `{:error, step, {:error, child_step, reason, child_results}, results}`. A child's halt ends only the child; the parent continues with the child's results.
+- **Child queues**: a `run/4` function may return a queue, which runs as a child with its state stored under the step's name. A failing child step is reported as `{:error, step, {:error, child_step, reason, child_state}, state}`. A child's halt ends only the child; the parent continues with the child's state.
 - **Arity-0 steps**: pass explicit `[]` to call a function or MFA with no queue inputs. In a `queue` block, this list is generated automatically.
 - **Step functions are validated when added**: a function's arity must match its params, and a `{module, function, args}` function must exist. Mistakes raise `ArgumentError` when the step is added instead of failing when the pipeline runs.
 
 Breaking:
 
-- **Debugging follows execution timing.** Debug options in a `queue` block are evaluated only when reached and may reference earlier steps. Options must be a keyword list and `only:` must contain valid step names; invalid options or selections raise `ArgumentError` when added through the functional API or evaluated in a block. `nil` and `false` selections no longer print all results. The `only:` option is removed before forwarding inspection options.
-- **Omitted params and explicit `[]` are distinct**, for both `run` and `let`, functions and MFAs. Omitting params passes all results so far as one map; `[]` or `{[], opts}` passes no queue inputs. MFA fixed arguments are still passed. If a callback needs all results, omit params instead of passing `[]`; zero-argument callbacks must supply `[]` explicitly. Named params continue passing the listed values in order.
+- **Debugging follows execution timing.** Debug options in a `queue` block are evaluated only when reached and may reference earlier steps. Options must be a keyword list and `only:` must contain valid step names; invalid options or selections raise `ArgumentError` when added through the functional API or evaluated in a block. `nil` and `false` selections no longer print the whole state. The `only:` option is removed before forwarding inspection options.
+- **Omitted params and explicit `[]` are distinct**, for both `run` and `let`, functions and MFAs. Omitting params passes the whole state as one map; `[]` or `{[], opts}` passes no queue inputs. MFA fixed arguments are still passed. If a callback needs the whole state, omit params instead of passing `[]`; zero-argument callbacks must supply `[]` explicitly. Named params continue passing the listed values in order.
 - **Step names must be atoms or tuples**, such as `:user` or `{:invite, user_id}`. Lists, strings, numbers and other terms, as well as `nil`, `true` and `false`, now raise `ArgumentError` when the step is added. Wrap dynamic identifiers in a tuple, for example `{:item, id}`.
 - **Bare `:_` step names are rejected** with `ArgumentError` when added through the functional API. Use a descriptive name instead. Underscore-prefixed names such as `:_notified` are ordinary unique names and retain their results.
 
@@ -61,7 +61,7 @@ Breaking:
 - **`exec/1` is renamed to `execute/1`.**
   - Upgrade: replace `Q.exec(queue)` and `|> exec()` with `Q.execute(queue)` and `|> execute()`.
 - **`execute/1` on an empty queue returns `{:ok, %{}}`** instead of `{:ok, nil}`.
-- **A step returning a bare `:error` fails the pipeline** with `{:error, step, :error, results}`. It used to raise.
+- **A step returning a bare `:error` fails the pipeline** with `{:error, step, :error, state}`. It used to raise.
   - Upgrade: code that rescued the `RuntimeError` for such steps should match the error tuple instead.
 - **Build-time mistakes raise `ArgumentError`** instead of `RuntimeError`: a duplicate step name, or a param that refers to a step that doesn't exist.
 - **Invalid step functions raise `ArgumentError` when the step is added**, see above. A value that isn't a function, `{module, function}` or `{module, function, args}` raises `ArgumentError` instead of `FunctionClauseError`.

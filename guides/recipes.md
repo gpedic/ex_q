@@ -16,21 +16,21 @@ def refund(order_id) do
   |> execute()
   |> case do
     {:ok, %{refund: refund}} -> {:ok, refund}
-    {:error, :order, :not_found, _results} -> {:error, :unknown_order}
-    {:error, step, reason, _results} -> {:error, step, reason}
+    {:error, :order, :not_found, _state} -> {:error, :unknown_order}
+    {:error, step, reason, _state} -> {:error, step, reason}
   end
 end
 ```
 
 ## Return your own error shape
 
-Callers often don't need the results map. Drop it, or keep only what helps:
+Callers often don't need the state. Drop it, or keep only what helps:
 
 ```elixir
 |> case do
-  {:ok, results} -> {:ok, results.refund}
+  {:ok, state} -> {:ok, state.refund}
   {:error, step, reason, %{order: order}} -> {:error, %{step: step, reason: reason, order_id: order.id}}
-  {:error, step, reason, _results} -> {:error, %{step: step, reason: reason}}
+  {:error, step, reason, _state} -> {:error, %{step: step, reason: reason}}
 end
 ```
 
@@ -51,7 +51,7 @@ end
 
 ## Run a step only sometimes
 
-Put the conditional inside the step. Return `{:ok, nil}` when it doesn't apply, so the step is always in the results and later steps can use it:
+Put the conditional inside the step. Return `{:ok, nil}` when it doesn't apply, so the step is always in the state and later steps can use it:
 
 ```elixir
 queue bind: [order] do
@@ -66,7 +66,7 @@ Without an `else`, a false condition gives `nil`, which is stored too.
 
 ## Stop early on a cache hit
 
-Return `{:halt, value}` to end the queue successfully. The halting step's value is stored under its name, and the later steps aren't in the results. Tell a hit from a full run by a key only the full run has:
+Return `{:halt, value}` to end the queue successfully. The halting step's value is stored under its name, and the later steps aren't in the state. Tell a hit from a full run by a key only the full run has:
 
 ```elixir
 def price(product_id) do
@@ -79,7 +79,7 @@ def price(product_id) do
   |> case do
     {:ok, %{price: price}} -> {:ok, price}
     {:ok, %{cached: price}} -> {:ok, price}
-    {:error, step, reason, _results} -> {:error, step, reason}
+    {:error, step, reason, _state} -> {:error, step, reason}
   end
 end
 
@@ -91,11 +91,11 @@ defp cache_lookup(product_id) do
 end
 ```
 
-Match the full-run key first: on a miss, `cached` is in the results too.
+Match the full-run key first: on a miss, `cached` is in the state too.
 
 ## Undo completed steps after a failure
 
-Q doesn't roll back. The error tuple holds the results of every step that completed, so undo what's there:
+Q doesn't roll back. The state in the error tuple holds the result of every step that completed, so undo what's there:
 
 ```elixir
 queue bind: [order] do
@@ -104,14 +104,14 @@ queue bind: [order] do
 end
 |> execute()
 |> case do
-  {:ok, results} ->
-    {:ok, results}
+  {:ok, state} ->
+    {:ok, state}
 
   {:error, step, reason, %{payment: payment}} ->
     Payments.refund(payment)
     {:error, step, reason}
 
-  {:error, step, reason, _results} ->
+  {:error, step, reason, _state} ->
     {:error, step, reason}
 end
 ```
@@ -143,9 +143,9 @@ end
 
 ## Per-item steps that need an earlier result
 
-When the items come from an earlier step, return the per-item queue from a step. It runs as a child queue, with its results stored as a map under the step's name.
+When the items come from an earlier step, return the per-item queue from a step. It runs as a child queue, with its state stored under the step's name.
 
-A failed child's results are only in the nested error tuple, so clean up from there. If a later step fails, the child finished, and its results are under its name:
+A failed child's state is only in the nested error tuple, so clean up from there. If a later step fails, the child finished, and its state is under its name:
 
 ```elixir
 def import_order(customer, csv) do
@@ -156,15 +156,15 @@ def import_order(customer, csv) do
   end
   |> execute()
   |> case do
-    {:ok, results} ->
-      {:ok, results.charge}
+    {:ok, state} ->
+      {:ok, state.charge}
 
-    {:error, :reservations, {:error, step, reason, reserved}, _results} ->
+    {:error, :reservations, {:error, step, reason, reserved}, _state} ->
       release(reserved)
       {:error, step, reason}
 
-    {:error, step, reason, results} ->
-      release(Map.get(results, :reservations, %{}))
+    {:error, step, reason, state} ->
+      release(Map.get(state, :reservations, %{}))
       {:error, step, reason}
   end
 end
@@ -206,9 +206,9 @@ end
 
 The same function can also run on its own: `billing_steps(user) |> execute()`.
 
-## Use the results on success
+## Use every step's result on success
 
-The results map has every step's result, so you can return or pass on several values without building a map by hand:
+The state has every step's result, so you can return or pass on several values without building a map by hand:
 
 ```elixir
 def show(conn, %{"id" => id}) do
@@ -219,23 +219,23 @@ def show(conn, %{"id" => id}) do
   end
   |> execute()
   |> case do
-    {:ok, results} -> render(conn, :show, results)
-    {:error, _step, :not_found, _results} -> send_resp(conn, 404, "")
-    {:error, _step, _reason, _results} -> send_resp(conn, 500, "")
+    {:ok, state} -> render(conn, :show, state)
+    {:error, _step, :not_found, _state} -> send_resp(conn, 404, "")
+    {:error, _step, _reason, _state} -> send_resp(conn, 500, "")
   end
 end
 ```
 
-Bound values are in the results too, so `id` is passed to the template along with the rest.
+Bound values are in the state too, so `id` is passed to the template along with the rest.
 
 ## Test a queue
 
-Run the queue and assert on the results map, intermediate steps included. For failures, assert on the step:
+Run the queue and assert on the state, intermediate steps included. For failures, assert on the step:
 
 ```elixir
 test "a declined card fails at :charge and keeps the reservations for cleanup" do
-  assert {:error, :charge, :declined, results} = checkout_steps(declined_card()) |> Q.execute()
-  assert Map.has_key?(results, :reservations)
+  assert {:error, :charge, :declined, state} = checkout_steps(declined_card()) |> Q.execute()
+  assert Map.has_key?(state, :reservations)
 end
 ```
 

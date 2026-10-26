@@ -191,7 +191,7 @@ defmodule QTest do
       end
 
       assert_raise ArgumentError,
-                   ~r/expected a function of arity 1 to receive all results/,
+                   ~r/expected a function of arity 1 to receive the whole state/,
                    fn ->
                      Q.new() |> Q.run(:b, fn _, _ -> {:ok, 2} end)
                    end
@@ -361,7 +361,7 @@ defmodule QTest do
             fn -> Q.let(Q.new(), :empty, &TestInputs.plain/0) end
           ] do
         error = assert_raise ArgumentError, build
-        assert error.message =~ "expected a function of arity 1 to receive all results"
+        assert error.message =~ "expected a function of arity 1 to receive the whole state"
         assert error.message =~ "pass [] for no queue inputs"
       end
     end
