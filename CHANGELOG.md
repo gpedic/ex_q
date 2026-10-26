@@ -69,11 +69,6 @@ Breaking:
 - **`operations/1` lists step names only**, without debug operations.
 - The `Q.fun_arity1()` type is removed; use `Q.step_fun()`. The `Q.exec_error()` type is renamed to `Q.error()`, after `exec/1` became `execute/1`.
 
-### Planned
-
-- Telemetry events for each step.
-- Running independent steps concurrently, using the dependencies each step declares.
-
 ## 1.2.0
 
 - Fixed the DSL rewriting calls inside step functions (e.g. `Kernel.inspect/1` in a `fn`), shadowing a caller variable named `queue`, and silently dropping steps added inside `if`/`case`. The latter, and `exec()` before the last statement, now raise at compile time.
