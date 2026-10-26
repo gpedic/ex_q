@@ -29,6 +29,7 @@ The 1.x syntax is removed, and its calls inside a `queue` block are a compile er
 Also new in the block:
 
 - The block only builds the queue; pipe it into `execute/1` to run it. `execute()` and `exec()` inside the block are compile errors, so a function that returns a queue can't run it by accident before its caller runs it as a sub-pipeline.
+- A block is a scope of its own, like `quote`: steps can't use variables from outside it, so a misspelled step reference is a compile error even when a variable of that name exists. Outside values come in with `queue bind: [order, limit: opts[:limit]] do`; a bare variable binds under its own name, `name: expr` binds any expression, and each becomes one of the queue's first steps, in the state and in error tuples. A nested block binds what it needs from the enclosing one.
 - `name = expr` stores a value or the result of a function that can't fail; `<-` is for functions returning `{:ok, value}` or `{:error, reason}`.
 - `if`, `unless`, `case` and `cond` around steps choose which steps run, based on earlier results.
 - Every step must have a unique name and stores its successful result, including names starting with `_`. Bare `_` bindings are rejected at compile time.
