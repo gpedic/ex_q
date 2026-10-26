@@ -20,7 +20,10 @@ defmodule Q.DSL do
   @special_forms [:__MODULE__, :__ENV__, :__DIR__, :__CALLER__, :__STACKTRACE__]
 
   def compile(opts, block, caller) do
-    env = %{caller: caller, scope: :"Elixir.Q.DSL.Scope.#{System.unique_integer([:positive])}"}
+    # One context per block, so a nested block can't see the enclosing block's
+    # variables. The line is unique enough: a nested block opens on a later line
+    # than the block it's in, and blocks that aren't nested never share variables.
+    env = %{caller: caller, scope: :"Elixir.Q.DSL.Scope.L#{caller.line}"}
     {binds, names} = compile_binds!(opts, env)
     {body, _bound} = compile_statements(statements(block), names, names, env)
 
