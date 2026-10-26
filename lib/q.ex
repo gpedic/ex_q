@@ -1,7 +1,7 @@
 defmodule Q do
   @moduledoc """
-  A `with` that remembers: a chain of named steps, run with `execute/1`, that keeps every
-  step's result.
+  Pipelines of named steps, like a `with` that remembers: every step's result is kept, and
+  a failure tells you which step it was.
 
   Each step's result is stored under the step's name, in a map called the state. When a step
   fails, `execute/1` returns the step's name, its error and the state built so far.

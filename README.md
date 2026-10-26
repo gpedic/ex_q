@@ -5,7 +5,7 @@
 
 # Q
 
-Q is a `with` that remembers. You get the result of every step, and when one fails, its name, its error and everything before it.
+Q builds pipelines of named steps. It's like a `with` that remembers: you get the result of every step, and when one fails, its name, its error and everything before it.
 
 ## The problem with `with`
 
