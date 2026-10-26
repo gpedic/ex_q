@@ -42,6 +42,69 @@ defmodule Q.DSL do
     end
   end
 
+  # `defq name(a, b) do ... end` is `def name(a, b), do: queue bind: [a, b] do ... end`.
+  # The head is passed through as written, so guards work; its arguments are the
+  # bound inputs and must be plain variables.
+  def define(kind, head, block, caller) do
+    env = %{caller: caller}
+    label = if kind == :def, do: "defq", else: "defpq"
+    args = head_args!(head, label, env)
+
+    queue =
+      quote do
+        Q.queue([bind: unquote(args)], do: unquote(block))
+      end
+
+    case kind do
+      :def -> quote do: def(unquote(head), do: unquote(queue))
+      :defp -> quote do: defp(unquote(head), do: unquote(queue))
+    end
+  end
+
+  defp head_args!({:when, _meta, [call, _guard]}, label, env), do: head_args!(call, label, env)
+
+  defp head_args!({name, _meta, args}, label, env)
+       when is_atom(name) and (is_list(args) or is_nil(args)) do
+    Enum.map(args || [], fn
+      {:_, meta, context} when is_atom(context) ->
+        compile_error!(
+          env,
+          meta,
+          "#{label} arguments must be named; _ cannot be an input, since each argument " <>
+            "becomes a step named after its variable"
+        )
+
+      {var, _meta, context} = arg when is_atom(var) and is_atom(context) ->
+        arg
+
+      {:\\, meta, _} = default ->
+        compile_error!(
+          env,
+          meta,
+          "#{label} arguments must be plain variables, got: #{Macro.to_string(default)}; " <>
+            "for a default, define another function that calls this one with it"
+        )
+
+      other ->
+        compile_error!(
+          env,
+          meta(other),
+          "#{label} arguments must be plain variables, got: #{Macro.to_string(other)}; " <>
+            "each argument becomes a step named after its variable, so take the value " <>
+            "apart in the steps that use it"
+        )
+    end)
+  end
+
+  defp head_args!(head, label, env) do
+    compile_error!(
+      env,
+      meta(head),
+      "expected a function head after #{label}, got: #{Macro.to_string(head)}; " <>
+        "write `#{label} name(arg) do ... end`"
+    )
+  end
+
   defp compile_binds!(opts, env) do
     unless Keyword.keyword?(opts) do
       compile_error!(
@@ -162,6 +225,17 @@ defmodule Q.DSL do
       meta,
       "merge(queue) is not a statement; run a queue as a step with `name <- queue`, " <>
         "its state is stored under `name`"
+    )
+  end
+
+  # A queue block written as a statement, often inside a defq body
+  defp compile_statement({:queue, meta, args}, _steps, env) when is_list(args) do
+    compile_error!(
+      env,
+      meta,
+      "a queue block is not a queue statement; to run it as a child step, bind it: " <>
+        "`name <- queue do ... end`. A defq body is already a queue block, so write the " <>
+        "steps directly"
     )
   end
 

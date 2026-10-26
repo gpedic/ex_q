@@ -184,14 +184,12 @@ end
 
 ## Reuse a group of steps
 
-A function that returns a queue, without running it, can be used as a step in any other queue. Its step names don't clash with the parent's:
+A function that returns a queue, without running it, can be used as a step in any other queue. `defq` defines one, with its arguments bound as the first steps. Its step names don't clash with the parent's:
 
 ```elixir
-def billing_steps(user) do
-  queue bind: [user] do
-    account <- Billing.fetch_account(user)
-    invoice <- Billing.invoice(account)
-  end
+defq billing_steps(user) do
+  account <- Billing.fetch_account(user)
+  invoice <- Billing.invoice(account)
 end
 
 queue bind: [id] do

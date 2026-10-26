@@ -178,6 +178,25 @@ Bound values are evaluated when the block is built, and they're stored like any 
 
 The block builds the queue but doesn't run it. Pipe it into `Q.execute/1`. That lets a function return a queue and leave it to the caller to run it, or to use it as a [child queue](#child-queues).
 
+### Functions that build a queue
+
+`defq` defines a function that returns a queue, with its arguments bound as the first steps:
+
+```elixir
+defq billing_steps(user) do
+  validated <- Billing.validate(user)
+  invoice <- Billing.invoice(validated)
+end
+
+billing_steps(user) |> execute()
+
+# {:ok, %{user: ..., validated: ..., invoice: ...}}
+```
+
+It's the same as a `def` whose body is `queue bind: [user] do ... end`, so the signature lists the queue's inputs. The arguments must be plain variables; guards are allowed. `defpq` defines a private one.
+
+Use `defq` for functions that build a queue, to run or to use as a [child queue](#child-queues). A function that runs the queue and handles the result, like the webhook handler above, stays a `def` with `queue ... |> execute()` inside.
+
 ### Rules
 
 * Each statement is a step (`name = expr` or `name <- expr`) or `debug()`. Conditionals go inside a step; see [Conditional steps](#conditional-steps).
@@ -285,18 +304,14 @@ A halt stops the queue it's in, the way `{:halt, acc}` stops `Enum.reduce_while/
 A step that returns a queue runs it as a child. The child's state is stored under the step's name. Its step names don't clash with the parent's, so a function that builds a queue can be reused anywhere:
 
 ```elixir
-def billing_steps(user) do
-  queue bind: [user] do
-    validated <- Billing.validate(user)
-    invoice <- Billing.invoice(validated)
-  end
+defq billing_steps(user) do
+  validated <- Billing.validate(user)
+  invoice <- Billing.invoice(validated)
 end
 
-def shipping_steps(user) do
-  queue bind: [user] do
-    validated <- Shipping.validate(user)
-    tracking <- Shipping.book(validated)
-  end
+defq shipping_steps(user) do
+  validated <- Shipping.validate(user)
+  tracking <- Shipping.book(validated)
 end
 
 queue bind: [id] do
@@ -316,7 +331,7 @@ end
 # }}
 ```
 
-Both children have a `validated` step, with no conflict. A child starts with an empty state, so it binds what it needs, like `user` above. You can also nest a block inline: `billing <- queue bind: [user] do ... end`.
+Both children have a `validated` step, with no conflict. A child starts with an empty state, so it gets what it needs as arguments, like `user` above. You can also nest a block inline: `billing <- queue bind: [user] do ... end`.
 
 If a child step fails, the parent step fails too. Its reason is the child's error tuple, with the child's state:
 

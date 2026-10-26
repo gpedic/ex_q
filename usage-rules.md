@@ -24,6 +24,7 @@ Q runs a chain of steps like `with`, keeps every step's result in a map called t
   - **any other value, including `false` and `nil`, is stored and the queue continues**
 - `name = expr` can't fail. The value is stored as is, never unwrapped: `{:ok, 1}` stays `{:ok, 1}`.
 - Steps can't see variables from outside the block. Bring them in with `bind: [var, name: expr]`; each becomes a step at the start of the queue.
+- For a function that builds a queue, use `defq name(a, b) do ... end` (`defpq` for private). It returns the queue, unrun, with the arguments bound as the first steps; the body is written like a queue block's. Arguments must be plain variables. A function that runs the queue and handles the result stays a `def` with `queue ... |> execute()` inside.
 
 ## State and errors
 
@@ -41,6 +42,7 @@ Q runs a chain of steps like `with`, keeps every step's result in a map called t
 - **Don't put `if`, `case` or `cond` around steps.** Put the conditional inside a step: `approval <- if total > 100, do: request(order), else: {:ok, nil}`.
 - **A boolean check doesn't stop the queue.** `<-` stores `false`. Write `ok <- if valid?(x), do: {:ok, true}, else: {:error, :invalid}`.
 - **Don't execute a queue you return from a step.** Return the queue itself, so it runs as a child.
+- **Don't put a `queue` block inside a `defq` body.** The body already is one: write the steps directly.
 - **A block has a fixed set of steps.** For a step per item, or names like `{:reserve, sku}`, use the functional API: `Q.new/0`, then `Q.run/4` in `Enum.reduce/3`, then `Q.execute/1`.
 - **Step names must be unique.** If per-item names can repeat, add the item's position: `{:reserve, index}`.
 - **In `Q.run`, omitted params and `[:key]` both take a one-argument function.** Omitted passes the whole state; `[:key]` passes that one result. `[]` passes nothing, for a zero-argument function.

@@ -21,6 +21,9 @@ defmodule Q do
       on `step`; the failing step isn't in `state`.
     * A step that returns a queue runs it as a child, with its state stored under the
       step's name.
+    * `defq name(a, b) do ... end` defines a function that returns a queue, with its
+      arguments bound as the first steps. Use it for functions that build a queue; a
+      function that runs the queue and handles the result stays a `def`.
     * For a step per item, or names like `{:reserve, sku}`, use the functional API
       (`new/0`, `run/4`). Step names must be unique.
 
@@ -41,6 +44,10 @@ defmodule Q do
   which become its inputs, but not variables from outside the block. Outside values come in
   through `bind:`, which makes them the queue's first steps. The block only builds the
   queue; `execute/1` runs it. See `queue/2` for all the rules.
+
+  A function that builds a queue from its arguments can be written with `defq/2`:
+  `defq billing_steps(user) do ... end` is `def billing_steps(user)` returning
+  `queue bind: [user] do ... end`.
 
   The block is checked when your code compiles. For pipelines built from data there is a
   functional API, checked when each step is added; see "The functional API" below.
@@ -445,6 +452,52 @@ defmodule Q do
   defmacro queue(opts \\ [], do: block) do
     Q.DSL.compile(opts, block, __CALLER__)
   end
+
+  @doc """
+  Defines a function that builds a queue from its arguments.
+
+      defq billing_steps(user) do
+        validated <- Billing.validate(user)
+        invoice <- Billing.invoice(validated)
+      end
+
+  is the same as
+
+      def billing_steps(user) do
+        queue bind: [user] do
+          validated <- Billing.validate(user)
+          invoice <- Billing.invoice(validated)
+        end
+      end
+
+  The arguments are bound as the queue's first steps, so the function's signature is the
+  pipeline's list of inputs, and they're in the state like any step. They must be plain
+  variables; a pattern, a default value or `_` is a compile error. Guards are allowed. The
+  body is a queue block, so it follows the rules in `queue/2`.
+
+  The function returns the queue without running it, so callers run it with `execute/1`
+  or as a child step. Use `defq` for functions that build a queue. A function that runs
+  the queue and handles the result stays a `def`, with `queue ... |> execute()` inside.
+
+  ## Example
+      iex> defmodule Greeter do
+      ...>   import Q
+      ...>
+      ...>   defq greet(name) do
+      ...>     greeting = "hello " <> name
+      ...>   end
+      ...> end
+      iex> Greeter.greet("joe") |> Q.execute()
+      {:ok, %{name: "joe", greeting: "hello joe"}}
+  """
+  @doc group: "Writing a pipeline"
+  defmacro defq(head, do: block), do: Q.DSL.define(:def, head, block, __CALLER__)
+
+  @doc """
+  Same as `defq/2`, defining a private function.
+  """
+  @doc group: "Writing a pipeline"
+  defmacro defpq(head, do: block), do: Q.DSL.define(:defp, head, block, __CALLER__)
 
   defp add_op(%Q{}, {:step, :_, _kind, _}) do
     raise ArgumentError, "every step must have a name; _ cannot name a step"

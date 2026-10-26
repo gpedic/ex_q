@@ -6,6 +6,33 @@ defmodule Q.DSLTest do
 
   @suffix "!"
 
+  defmodule Pipelines do
+    import Q
+
+    defq decode(data) do
+      decoded <- Base.decode64(data)
+      upper = String.upcase(decoded)
+    end
+
+    defq constant do
+      answer = 42
+    end
+
+    defq guarded(n) when is_integer(n) do
+      doubled = n * 2
+    end
+
+    defpq secret(x) do
+      hidden = x
+    end
+
+    def uses_private(x), do: execute(secret(x))
+
+    defq nested(name) do
+      inner <- secret(name)
+    end
+  end
+
   defp positive(n) when n > 0, do: {:ok, n}
   defp positive(_n), do: {:error, :not_positive}
 
@@ -24,7 +51,7 @@ defmodule Q.DSLTest do
 
   defp compile_error(code) do
     assert_raise CompileError, fn ->
-      Code.eval_string("import Q, only: [queue: 1, queue: 2]\n\n" <> code)
+      Code.eval_string("import Q, only: [queue: 1, queue: 2, defq: 2, defpq: 2]\n\n" <> code)
     end
   end
 
@@ -584,6 +611,79 @@ defmodule Q.DSLTest do
                   module: __MODULE__,
                   suffix: "!"
                 }}
+    end
+  end
+
+  describe "defq and defpq" do
+    test "the arguments are the queue's first steps, and the queue is returned unrun" do
+      q = Pipelines.decode("aGVsbG8=")
+      assert Q.__to_list__(q) == [put: :data, run: :decoded, let: :upper]
+      assert execute(q) == {:ok, %{data: "aGVsbG8=", decoded: "hello", upper: "HELLO"}}
+    end
+
+    test "zero arguments and guards" do
+      assert execute(Pipelines.constant()) == {:ok, %{answer: 42}}
+      assert execute(Pipelines.guarded(2)) == {:ok, %{n: 2, doubled: 4}}
+      # Called through apply/3, as the type checker rightly rejects a direct call
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      assert_raise FunctionClauseError, fn -> apply(Pipelines, :guarded, [:two]) end
+    end
+
+    test "defpq defines a private function" do
+      refute function_exported?(Pipelines, :secret, 1)
+      assert Pipelines.uses_private(1) == {:ok, %{x: 1, hidden: 1}}
+    end
+
+    test "a defq queue runs as a child step" do
+      assert execute(Pipelines.nested("joe")) ==
+               {:ok, %{name: "joe", inner: %{x: "joe", hidden: "joe"}}}
+    end
+
+    test "arguments must be plain variables, and the error says what to do instead" do
+      for {arg, expected} <- [
+            {"%{id: id}",
+             "defq arguments must be plain variables, got: %{id: id}; each argument becomes " <>
+               "a step named after its variable, so take the value apart in the steps that use it"},
+            {"a \\\\ 1",
+             "defq arguments must be plain variables, got: a \\\\ 1; for a default, define " <>
+               "another function that calls this one with it"},
+            {"_",
+             "defq arguments must be named; _ cannot be an input, since each argument becomes " <>
+               "a step named after its variable"}
+          ] do
+        error = compile_error("defmodule BadArgs do\n  defq f(#{arg}) do\n    b = 1\n  end\nend")
+        assert error.description == expected
+      end
+
+      error = compile_error("defmodule BadHead do\n  defpq 1 do\n    b = 1\n  end\nend")
+
+      assert error.description ==
+               "expected a function head after defpq, got: 1; write `defpq name(arg) do ... end`"
+    end
+
+    test "a queue block inside a defq body points at writing the steps directly" do
+      error =
+        compile_error("""
+        defmodule NestedBody do
+          defq f(x) do
+            queue bind: [x] do
+              y = x
+            end
+          end
+        end
+        """)
+
+      assert error.description =~ "a queue block is not a queue statement"
+      assert error.description =~ "A defq body is already a queue block"
+    end
+
+    test "the body follows the queue block rules" do
+      error =
+        compile_error(
+          "defmodule BadBody do\n  defq f(x) do\n    {:ok, y} <- {:ok, x}\n  end\nend"
+        )
+
+      assert error.description =~ "so write `y <- expr`"
     end
   end
 
