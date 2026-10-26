@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.1.0
+
+- **`defq/2` and `defpq/2`** define a function that builds a queue from its arguments: `defq billing_steps(user) do ... end` is `def billing_steps(user), do: queue bind: [user] do ... end`. The arguments must be plain variables; guards are allowed. The function returns the queue, to run with `execute/1` or as a child step.
+
 ## 2.0.0
 
 ### New `queue` syntax

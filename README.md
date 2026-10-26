@@ -198,18 +198,14 @@ Steps in the branch that runs are added to the result, and an error or halt in t
 A step whose function returns a queue runs it as a child, and stores the child's results as a map under the step's name. The child's step names stay separate from the parent's, so a queue built by a function can be reused anywhere:
 
 ```elixir
-def billing_steps(user) do
-  queue bind: [user] do
-    validated <- Billing.validate(user)
-    invoice <- Billing.invoice(validated)
-  end
+defq billing_steps(user) do
+  validated <- Billing.validate(user)
+  invoice <- Billing.invoice(validated)
 end
 
-def shipping_steps(user) do
-  queue bind: [user] do
-    validated <- Shipping.validate(user)
-    tracking <- Shipping.book(validated)
-  end
+defq shipping_steps(user) do
+  validated <- Shipping.validate(user)
+  tracking <- Shipping.book(validated)
 end
 
 queue bind: [id] do
@@ -229,7 +225,7 @@ end
 # }}
 ```
 
-Both children use `validated` without conflict. A child runs with its own state, so it binds its inputs, like `user` above. A block can also be nested inline: `billing <- queue bind: [user] do ... end`; the nested block is a scope of its own too, and binds what it needs from the enclosing one.
+`defq` defines a function that builds a queue from its arguments: `defq billing_steps(user) do ... end` is `def billing_steps(user), do: queue bind: [user] do ... end`, so the signature is the pipeline's list of inputs. The arguments must be plain variables; guards are allowed. `defpq` defines a private one. Both children use `validated` without conflict. A child runs with its own state, so it binds its inputs. A block can also be nested inline: `billing <- queue bind: [user] do ... end`; the nested block is a scope of its own too, and binds what it needs from the enclosing one.
 
 If a child step fails, the parent step fails and the reason is the child's error tuple, with the child's results up to the failure:
 

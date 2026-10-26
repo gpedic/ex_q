@@ -2,7 +2,7 @@ defmodule Q.MixProject do
   use Mix.Project
 
   @name "Q"
-  @version "2.0.0"
+  @version "2.1.0"
   @url "https://github.com/gpedic/ex_q"
 
   def project do

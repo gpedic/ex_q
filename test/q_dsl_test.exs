@@ -6,6 +6,33 @@ defmodule Q.DSLTest do
 
   @suffix "!"
 
+  defmodule Pipelines do
+    import Q
+
+    defq decode(data) do
+      decoded <- Base.decode64(data)
+      upper = String.upcase(decoded)
+    end
+
+    defq constant do
+      answer = 42
+    end
+
+    defq guarded(n) when is_integer(n) do
+      doubled = n * 2
+    end
+
+    defpq secret(x) do
+      hidden = x
+    end
+
+    def uses_private(x), do: execute(secret(x))
+
+    defq nested(name) do
+      inner <- secret(name)
+    end
+  end
+
   defp positive(n) when n > 0, do: {:ok, n}
   defp positive(_n), do: {:error, :not_positive}
 
@@ -24,7 +51,7 @@ defmodule Q.DSLTest do
 
   defp compile_error(code) do
     assert_raise CompileError, fn ->
-      Code.eval_string("import Q, only: [queue: 1, queue: 2]\n\n" <> code)
+      Code.eval_string("import Q, only: [queue: 1, queue: 2, defq: 2, defpq: 2]\n\n" <> code)
     end
   end
 
@@ -889,6 +916,44 @@ defmodule Q.DSLTest do
                   module: __MODULE__,
                   suffix: "!"
                 }}
+    end
+  end
+
+  describe "defq and defpq" do
+    test "the arguments are the queue's first steps, and the queue is returned unrun" do
+      q = Pipelines.decode("aGVsbG8=")
+      assert Q.__to_list__(q) == [put: :data, run: :decoded, let: :upper]
+      assert execute(q) == {:ok, %{data: "aGVsbG8=", decoded: "hello", upper: "HELLO"}}
+    end
+
+    test "zero arguments and guards" do
+      assert execute(Pipelines.constant()) == {:ok, %{answer: 42}}
+      assert execute(Pipelines.guarded(2)) == {:ok, %{n: 2, doubled: 4}}
+      assert_raise FunctionClauseError, fn -> Pipelines.guarded(:two) end
+    end
+
+    test "defpq defines a private function" do
+      refute function_exported?(Pipelines, :secret, 1)
+      assert Pipelines.uses_private(1) == {:ok, %{x: 1, hidden: 1}}
+    end
+
+    test "a defq queue runs as a child step" do
+      assert execute(Pipelines.nested("joe")) ==
+               {:ok, %{name: "joe", inner: %{x: "joe", hidden: "joe"}}}
+    end
+
+    test "arguments must be plain variables" do
+      for {arg, expected} <- [
+            {"%{id: id}", "defq arguments must be plain variables, got: %{id: id}"},
+            {"a \\\\ 1", "defq arguments must be plain variables, got: a \\\\ 1"},
+            {"_", "defq arguments must be named; _ cannot be an input"}
+          ] do
+        error = compile_error("defmodule BadArgs do\n  defq f(#{arg}) do\n    b = 1\n  end\nend")
+        assert error.description == expected
+      end
+
+      error = compile_error("defmodule BadHead do\n  defpq 1 do\n    b = 1\n  end\nend")
+      assert error.description == "expected a function head after defpq, got: 1"
     end
   end
 

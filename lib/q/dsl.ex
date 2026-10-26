@@ -34,6 +34,53 @@ defmodule Q.DSL do
     end
   end
 
+  # `defq name(a, b) do ... end` is `def name(a, b), do: queue bind: [a, b] do ... end`.
+  # The head is passed through as written, so guards work; its arguments are the
+  # bound inputs and must be plain variables.
+  def define(kind, head, block, caller) do
+    env = %{caller: caller}
+    label = if kind == :def, do: "defq", else: "defpq"
+    args = head_args!(head, label, env)
+
+    queue =
+      quote do
+        Q.queue([bind: unquote(args)], do: unquote(block))
+      end
+
+    case kind do
+      :def -> quote do: def(unquote(head), do: unquote(queue))
+      :defp -> quote do: defp(unquote(head), do: unquote(queue))
+    end
+  end
+
+  defp head_args!({:when, _meta, [call, _guard]}, label, env), do: head_args!(call, label, env)
+
+  defp head_args!({name, _meta, args}, label, env)
+       when is_atom(name) and (is_list(args) or is_nil(args)) do
+    Enum.map(args || [], fn
+      {:_, meta, context} when is_atom(context) ->
+        compile_error!(env, meta, "#{label} arguments must be named; _ cannot be an input")
+
+      {var, _meta, context} = arg when is_atom(var) and is_atom(context) ->
+        arg
+
+      other ->
+        compile_error!(
+          env,
+          meta(other),
+          "#{label} arguments must be plain variables, got: #{Macro.to_string(other)}"
+        )
+    end)
+  end
+
+  defp head_args!(head, label, env) do
+    compile_error!(
+      env,
+      meta(head),
+      "expected a function head after #{label}, got: #{Macro.to_string(head)}"
+    )
+  end
+
   defp compile_binds!(opts, env) do
     unless Keyword.keyword?(opts) do
       compile_error!(
