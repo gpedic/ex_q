@@ -6,6 +6,24 @@ defmodule Q do
   Each step's result is stored under the step's name. When a step fails, `execute/1` returns
   the step's name, its error and the results of every step before it.
 
+  ## Rules at a glance
+
+    * Write a pipeline as a `queue` block and run it with `execute/1`. The block only
+      builds the queue.
+    * `name <- expr` can fail: `{:ok, value}` is unwrapped, `{:error, reason}` or `:error`
+      stops the queue, and `{:halt, value}` ends it early. Any other value, including
+      `false` and `nil`, is stored and the queue continues.
+    * `name = expr` can't fail: the value is stored as is.
+    * Steps can't see variables from outside the block. Bring them in with
+      `bind: [var, name: expr]`.
+    * A conditional goes inside a step: `name <- if condition, do: ..., else: {:ok, nil}`.
+    * `execute/1` returns `{:ok, results}` or `{:error, step, reason, results}`. Match
+      errors on `step`; the failing step isn't in `results`.
+    * A step that returns a queue runs it as a child, with its results stored as a map
+      under the step's name.
+    * For a step per item, or names like `{:reserve, sku}`, use the functional API
+      (`new/0`, `run/4`). Step names must be unique.
+
   ## Writing a pipeline
 
   Pipelines are written with `queue/2`, where every step is a binding:
@@ -282,6 +300,10 @@ defmodule Q do
 
   MFA fixed arguments follow the results. Use `run/4` with `[]` for no queue inputs, or
   with a list of names to receive specific results. See `run/4` for the return contract.
+
+  A one-argument function also fits `run(queue, name, fun, [:key])`, so mixing up the two
+  isn't caught when the step is added: here the function gets the whole results map, not
+  the result of `:key`.
   """
   @doc group: "Functional API"
   @spec run(t, name, step_fun | fun_mfa) :: t

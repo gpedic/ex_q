@@ -221,6 +221,8 @@ end
 
 The step always runs, so it's always in the results and later steps can use it. If the branch that runs returns an error or a halt, the queue stops as usual.
 
+Without an `else`, a false condition gives `nil`, which `<-` stores like any other value: `approval <- if total > 100, do: Approvals.request(order)` stores `nil` for small orders.
+
 For several steps in one branch, return a queue. It runs as a [child queue](#child-queues):
 
 ```elixir
@@ -318,6 +320,16 @@ If a child step fails, the parent step fails too. Its reason is the child's erro
 {:error, :billing, {:error, :invoice, :declined, %{user: ..., validated: ...}}, %{id: ..., user: ...}}
 ```
 
+A failed child's results are only in that nested tuple, so that's where to find what it did before failing:
+
+```elixir
+{:error, :reservations, {:error, _step, reason, reserved}, _results} ->
+  for {_step, reservation} <- reserved, do: Inventory.release(reservation)
+  {:error, :reservations, reason}
+```
+
+If a later step fails instead, the child finished, and its results are under its name as usual.
+
 To store a queue without running it, use `=` or return `{:ok, queue}`.
 
 ## Debugging
@@ -404,6 +416,8 @@ Step names are atoms or tuples, like `{:invite, id}`. `nil`, `true`, `false` and
 | Omitted | All results so far, as one map |
 | `[]` | None |
 | `[:input, :options]` | Those results, in that order |
+
+Omitted params and a one-name list both call a one-argument function, so a mix-up isn't caught when the step is added: with params omitted, the function gets the whole results map instead of one result.
 
 A step function can be a function, a capture or an MFA (`{module, function, args}`). An MFA's `args` are fixed arguments, like options. Inputs go before them, or after with `{[:key], order: :append}`:
 
