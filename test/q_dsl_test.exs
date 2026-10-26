@@ -64,6 +64,18 @@ defmodule Q.DSLTest do
       assert {:ok, %{input: "aGVsbG8=", decoded: "hello", upper: "HELLO"}} = result
     end
 
+    test "<- stores a plain value as is, = stores even a result whole" do
+      result =
+        queue do
+          trimmed <- String.trim("  hi ")
+          unwrapped <- {:ok, 1}
+          whole = {:ok, 1}
+        end
+        |> execute()
+
+      assert result == {:ok, %{trimmed: "hi", unwrapped: 1, whole: {:ok, 1}}}
+    end
+
     test "a failing step is named after its variable" do
       result =
         queue do

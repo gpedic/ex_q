@@ -38,8 +38,16 @@ defmodule Q do
     * `{:halt, value, propagate: false}` - like `{:halt, value}`, but when the queue runs as
       a child (see below) only the child stops
     * a queue - runs it as a child, see below
+    * any other value - stores it under the step's name as is
 
-  Any other return value raises. A step written with `=` stores its value as is.
+  So `<-` works for functions that return plain values too. A malformed halt, or the result
+  of executing a queue instead of the queue itself, raises.
+
+  A step written with `=` can't fail or halt: whatever its expression returns is stored as
+  is, without unwrapping, so `{:ok, 1}` is stored as `{:ok, 1}`. Only an exception stops it.
+  Use `=` for values and for calls whose result you want exactly as it is, and `<-` when
+  the result decides what happens next. Reading a block, `<-` marks the steps that can
+  fail.
 
   Exceptions raised by step functions propagate unchanged, including exceptions in child
   queues. They aren't converted into error tuples, and Q doesn't attach accumulated state
@@ -289,7 +297,8 @@ defmodule Q do
   The function should return either `{:ok, value}` if the operation was successful or
   `{:error, reason}` if the operation failed. Functions can also return `{:halt, value}` to
   halt execution at any point, or a queue to run it as a child with its results stored under
-  `name`. See the module documentation for the complete contract.
+  `name`. Any other value is stored under `name` as is. See the module documentation for the
+  complete contract.
 
   ## Params
 
@@ -376,10 +385,11 @@ defmodule Q do
 
   Each statement is one of:
 
-    * `name = expr` - a step storing the value of `expr`, for values and functions that
-      can't fail (compiles to `let/4`)
-    * `name <- expr` - a step for functions returning `{:ok, value}`, `{:error, reason}`,
-      `:error` or `{:halt, value}` (compiles to `run/4`)
+    * `name = expr` - a step that can't fail: the value of `expr` is stored as is, without
+      unwrapping, even `{:ok, value}` (compiles to `let/4`)
+    * `name <- expr` - a step whose result decides what happens next: `{:ok, value}` is
+      unwrapped, `{:error, reason}` or `:error` stops the pipeline, `{:halt, value}` ends
+      it; any other value is stored as is (compiles to `run/4`)
     * `debug()` or `debug(opts)` - prints the state, see `debug/2`
     * `if`, `unless`, `case` or `cond` containing steps - the branch taken adds its steps
 
@@ -607,8 +617,8 @@ defmodule Q do
       {:halt, value} ->
         {:halt, {:halted, store!(state, name, value), true}}
 
-      {:halt, value, [propagate: propagate]} when is_boolean(propagate) ->
-        {:halt, {:halted, store!(state, name, value), propagate}}
+      {:halt, value, opts} = halt ->
+        {:halt, {:halted, store!(state, name, value), propagate!(name, opts, halt)}}
 
       {:error, reason} ->
         {:halt, {:error, name, reason, state}}
@@ -624,9 +634,18 @@ defmodule Q do
                 "of executing one, got: #{Kernel.inspect(executed)}; return the queue instead " <>
                 "of executing it, so it runs as a child"
 
-      other ->
-        raise "expected step #{Kernel.inspect(name)} to return {:ok, value}, {:error, reason}, :error, {:halt, value}, {:halt, value, propagate: boolean} or a queue, got: #{Kernel.inspect(other)}"
+      # Anything else is a plain value, stored as is
+      value ->
+        {:cont, {:ok, store!(state, name, value)}}
     end
+  end
+
+  defp propagate!(_name, [propagate: propagate], _halt) when is_boolean(propagate),
+    do: propagate
+
+  defp propagate!(name, _opts, halt) do
+    raise "expected step #{Kernel.inspect(name)} to halt with {:halt, value} or " <>
+            "{:halt, value, propagate: boolean}, got: #{Kernel.inspect(halt)}"
   end
 
   # A child queue runs with its own state and its result map is stored under the
